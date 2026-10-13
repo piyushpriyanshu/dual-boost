@@ -17,6 +17,7 @@ import java.net.SocketTimeoutException
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
@@ -50,10 +51,19 @@ class RelayServer(
 
     private val openSockets: MutableSet<java.io.Closeable> = ConcurrentHashMap.newKeySet()
     @Volatile private var running = false
+    private var acceptThread: Thread? = null
+
+    /** False if the relay has died unexpectedly (checked by the service watchdog). */
+    val alive: Boolean get() = running && acceptThread?.isAlive == true && !server.isClosed
 
     fun start() {
         running = true
-        Thread({ acceptLoop() }, "relay-accept").apply { isDaemon = true }.start()
+        acceptThread = Thread({ acceptLoop() }, "relay-accept").apply { isDaemon = true; start() }
+    }
+
+    /** Immediately drops every connection carried by [link] (it went away), so apps reconnect over the other one. */
+    fun closeFlows(link: Link) {
+        for (f in link.flows.toList()) runCatching { f.closer?.invoke() }
     }
 
     fun stop() {
@@ -145,37 +155,84 @@ class RelayServer(
     private fun handleConnect(client: Socket, cin: InputStream, cout: OutputStream, t: Target) {
         val order = balancer.order(t.addr, t.port, udp = false)
         if (order.isEmpty()) { reply(cout, 3); return }
+        val won = connectRaced(order, t) ?: run { reply(cout, 4); return }
+        relayTcp(client, cin, cout, won.sock, won.link)
+    }
 
-        var remote: Socket? = null
-        var used: Link? = null
-        for ((i, link) in order.withIndex()) {
-            val net = link.network ?: continue
-            val s = Socket()
-            try {
-                net.bindSocket(s)
-                val addr = t.addr ?: net.getByName(t.host!!)
-                val timeout = if (i == 0 && order.size > 1) FIRST_CONNECT_MS else LAST_CONNECT_MS
-                s.connect(InetSocketAddress(addr, t.port), timeout)
-                link.recordSuccess()
-                remote = s; used = link
-                break
-            } catch (e: Exception) {
-                runCatching { s.close() }
-                // "Network unreachable" (e.g. IPv6 on a v4-only link) is not the link's fault.
-                val unreachable = e is java.net.NoRouteToHostException ||
-                    (e is SocketException && e.message?.contains("unreachable", ignoreCase = true) == true)
-                if (!unreachable) link.recordFailure()
+    private class Attempt(val link: Link, val sock: Socket)
+
+    /**
+     * Connects over the preferred link, racing the next link if the first hasn't connected
+     * within [STAGGER_MS] (or failed). The first link to connect wins and the rest are closed.
+     * A dead link therefore costs ~0.6 s instead of a full connect timeout.
+     */
+    private fun connectRaced(order: List<Link>, t: Target): Attempt? {
+        val results = LinkedBlockingQueue<Pair<Attempt, Throwable?>>()
+        val started = ArrayList<Attempt>(2)
+        var next = 0
+
+        fun launchNext(): Boolean {
+            while (next < order.size) {
+                val link = order[next++]
+                val net = link.network ?: continue
+                val a = Attempt(link, Socket())
+                try {
+                    pool.execute {
+                        try {
+                            net.bindSocket(a.sock)
+                            val addr = t.addr ?: net.getByName(t.host!!)
+                            a.sock.connect(InetSocketAddress(addr, t.port), CONNECT_TIMEOUT_MS)
+                            results.put(a to null)
+                        } catch (e: Throwable) {
+                            results.put(a to e)
+                        }
+                    }
+                } catch (e: RejectedExecutionException) {
+                    runCatching { a.sock.close() }
+                    return false
+                }
+                started += a
+                return true
+            }
+            return false
+        }
+
+        if (!launchNext()) return null
+        var pending = 1
+        var winner: Attempt? = null
+        val deadline = System.currentTimeMillis() + CONNECT_TIMEOUT_MS + 1_000
+        while (winner == null && pending > 0) {
+            val canRace = next < order.size
+            val wait = if (canRace) STAGGER_MS else (deadline - System.currentTimeMillis()).coerceAtLeast(1)
+            val r = results.poll(wait, TimeUnit.MILLISECONDS)
+            if (r == null) {
+                if (canRace) { if (launchNext()) pending++ ; continue }
+                break // overall deadline reached
+            }
+            pending--
+            val (a, err) = r
+            if (err == null) {
+                winner = a
+                a.link.recordSuccess()
+            } else {
+                runCatching { a.sock.close() }
+                if (!isUnreachable(err)) a.link.recordFailure()
+                if (launchNext()) pending++
             }
         }
-        val sock = remote
-        val link = used
-        if (sock == null || link == null) { reply(cout, 4); return }
-        relayTcp(client, cin, cout, sock, link)
+        for (a in started) if (a !== winner) runCatching { a.sock.close() }
+        return winner
     }
+
+    /** "Network unreachable" (e.g. IPv6 on a v4-only link) is not the link's fault. */
+    private fun isUnreachable(e: Throwable): Boolean =
+        e is java.net.NoRouteToHostException ||
+            (e is SocketException && e.message?.contains("unreachable", ignoreCase = true) == true)
 
     private fun relayTcp(client: Socket, cin: InputStream, cout: OutputStream, remote: Socket, used: Link) {
         openSockets += remote
         val flow = Flow(used, udp = false)
+        flow.closer = { runCatching { remote.close() } }
         used.flows += flow
         try {
             remote.tcpNoDelay = true
@@ -241,7 +298,7 @@ class RelayServer(
         reply(cout, 0)
         client.soTimeout = 0
 
-        var session: UdpLeg? = null
+        var legs: List<UdpLeg> = emptyList()
         try {
             val head = ByteArray(3)
             val payload = ByteArray(65_535)
@@ -254,45 +311,55 @@ class RelayServer(
                 cin.readFully(payload, 0, dataLen)
 
                 val dst = target.addr ?: continue // engine always sends IP addresses
-                var leg = session
-                if (leg == null || leg.closed) {
-                    leg = openUdpLeg(dst, target.port, cout) ?: continue
-                    session = leg
+                legs = legs.filter { !it.closed }
+                // DNS goes out over both links at once; the first answer wins (apps ignore the duplicate).
+                val dual = target.port == 53
+                if (legs.isEmpty()) legs = openUdpLegs(dst, target.port, cout, dual, emptySet())
+                var sent = false
+                for (leg in legs) {
+                    if (leg.send(payload, dataLen, dst, target.port)) sent = true else leg.close()
                 }
-                if (!leg.send(payload, dataLen, dst, target.port)) {
-                    // The link could not send (e.g. IPv6 on a v4-only network): move to the other one.
-                    leg.close()
-                    val alt = openUdpLeg(dst, target.port, cout, exclude = leg.flow.link) ?: continue
-                    session = alt
-                    alt.send(payload, dataLen, dst, target.port)
+                if (!sent) {
+                    // The link(s) could not send (e.g. IPv6 on a v4-only network): move to another.
+                    val tried = legs.map { it.flow.link }.toSet()
+                    legs = openUdpLegs(dst, target.port, cout, dual, tried)
+                    for (leg in legs) leg.send(payload, dataLen, dst, target.port)
                 }
             }
         } catch (_: IOException) {
         } finally {
-            session?.close()
+            for (leg in legs) leg.close()
         }
     }
 
-    private fun openUdpLeg(dst: InetAddress, port: Int, cout: OutputStream, exclude: Link? = null): UdpLeg? {
+    private fun openUdpLegs(dst: InetAddress, port: Int, cout: OutputStream, dual: Boolean, exclude: Set<Link>): List<UdpLeg> {
+        val out = ArrayList<UdpLeg>(2)
         for (link in balancer.order(dst, port, udp = true)) {
-            if (link === exclude) continue
-            val net = link.network ?: continue
-            val sock = try {
-                DatagramSocket().also { net.bindSocket(it) }
-            } catch (e: Exception) {
-                continue
-            }
-            val leg = UdpLeg(sock, Flow(link, udp = true), cout)
-            link.flows += leg.flow
-            openSockets += sock
-            try {
-                pool.execute { leg.receiveLoop() }
-            } catch (e: RejectedExecutionException) {
-                leg.close(); return null
-            }
-            return leg
+            if (link in exclude) continue
+            val leg = openUdpLeg(link, cout) ?: continue
+            out += leg
+            if (!dual || out.size >= 2) break
         }
-        return null
+        return out
+    }
+
+    private fun openUdpLeg(link: Link, cout: OutputStream): UdpLeg? {
+        val net = link.network ?: return null
+        val sock = try {
+            DatagramSocket().also { net.bindSocket(it) }
+        } catch (e: Exception) {
+            return null
+        }
+        val leg = UdpLeg(sock, Flow(link, udp = true), cout)
+        leg.flow.closer = { leg.close() }
+        link.flows += leg.flow
+        openSockets += sock
+        try {
+            pool.execute { leg.receiveLoop() }
+        } catch (e: RejectedExecutionException) {
+            leg.close(); return null
+        }
+        return leg
     }
 
     private inner class UdpLeg(val sock: DatagramSocket, val flow: Flow, val cout: OutputStream) {
@@ -354,8 +421,9 @@ class RelayServer(
         private const val TAG = "DualBoost/Relay"
         private const val MAX_THREADS = 4096
         private const val BUFFER = 64 * 1024
-        private const val FIRST_CONNECT_MS = 5_000
-        private const val LAST_CONNECT_MS = 8_000
+        private const val CONNECT_TIMEOUT_MS = 8_000
+        /** How long the preferred link gets before the other link joins the race. */
+        private const val STAGGER_MS = 600L
         private const val HALF_CLOSE_IDLE_MS = 60_000
 
         private fun token(): String {

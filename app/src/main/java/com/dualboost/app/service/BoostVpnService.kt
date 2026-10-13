@@ -91,6 +91,7 @@ class BoostVpnService : VpnService() {
     override fun onDestroy() {
         if (tun != null) runCatching { worker.submit(Runnable { stopBoost(userRequested = false) }).get(5, TimeUnit.SECONDS) }
         worker.shutdown()
+        prober.shutdownNow()
         super.onDestroy()
     }
 
@@ -213,7 +214,7 @@ class BoostVpnService : VpnService() {
               password: '${rs.password}'
             misc:
               connect-timeout: 20000
-              tcp-read-write-timeout: 300000
+              tcp-read-write-timeout: 3600000
               udp-read-write-timeout: 60000
               log-level: error
             """.trimIndent() + "\n"
@@ -285,6 +286,8 @@ class BoostVpnService : VpnService() {
     }
 
     private fun teardown() {
+        recovering = false
+        recoveries.clear()
         proxyActive = false
         builtWith = ""
         ticker?.shutdownNow(); ticker = null
@@ -308,14 +311,115 @@ class BoostVpnService : VpnService() {
 
     private fun onLinksChanged() {
         if (tun == null) return
+        val lm = links
+        val rs = relay
+        if (lm != null && rs != null) {
+            // A link that disappeared: drop its connections now so apps reconnect over the other one
+            // instead of waiting for timeouts.
+            for (l in lm.all) if (!l.isUp && l.flows.isNotEmpty()) rs.closeFlows(l)
+        }
         runCatching { setUnderlyingNetworks(underlying()) }
         publishLinks()
+        requestProbe()
     }
 
     private fun linkStatus(l: Link) = when {
         !l.isUp -> LinkStatus.OFF
-        !l.validated -> LinkStatus.NO_INTERNET
+        !l.validated || !l.healthy -> LinkStatus.NO_INTERNET
         else -> LinkStatus.READY
+    }
+
+    // ------------------------------------------------------------------ health probes
+
+    private val prober = Executors.newSingleThreadExecutor { r -> Thread(r, "boost-probe").apply { isDaemon = true } }
+    @Volatile private var probeQueued = false
+
+    /** Queues one probe round (coalesced: at most one waiting at a time). */
+    private fun requestProbe() {
+        if (probeQueued) return
+        probeQueued = true
+        runCatching {
+            prober.execute {
+                probeQueued = false
+                runCatching { probeLinks() }
+            }
+        }.onFailure { probeQueued = false }
+    }
+
+    /**
+     * Opens a TCP connection over each link to two well-known anycast servers. No data is sent;
+     * it costs a few hundred bytes. Two failed rounds on a link that is also not moving data
+     * mark it unhealthy: new connections avoid it and its stuck connections are dropped.
+     */
+    private fun probeLinks() {
+        val lm = links ?: return
+        for (l in lm.all) {
+            val net = l.network ?: continue
+            var rtt = -1
+            for (target in PROBE_TARGETS) {
+                val sock = java.net.Socket()
+                try {
+                    net.bindSocket(sock)
+                    val t0 = System.nanoTime()
+                    sock.connect(java.net.InetSocketAddress(InetAddress.getByName(target), 443), PROBE_TIMEOUT_MS)
+                    rtt = ((System.nanoTime() - t0) / 1_000_000).toInt().coerceAtLeast(1)
+                    break
+                } catch (_: Exception) {
+                } finally {
+                    runCatching { sock.close() }
+                }
+            }
+            if (l.network != net) continue // network changed while probing
+            if (rtt > 0) {
+                l.rttMs = if (l.rttMs > 0) (l.rttMs * 2 + rtt) / 3 else rtt
+                l.probeFailures = 0
+                if (!l.healthy) { l.healthy = true; publishLinks() }
+            } else {
+                l.probeFailures++
+                // Still moving data? Then it isn't dead (the probe servers may just be blocked).
+                val moving = l.rxRate > 4_096
+                if (l.probeFailures >= 2 && !moving && l.healthy) {
+                    l.healthy = false
+                    Log.w(TAG, "${l.type} failed health probes; avoiding it")
+                    val other = lm.all.firstOrNull { it !== l && it.isGood }
+                    if (other != null) relay?.closeFlows(l)
+                    publishLinks()
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ self-healing
+
+    private val recoveries = ArrayDeque<Long>()
+    @Volatile private var recovering = false
+
+    /** Restarts the relay and/or engine after an unexpected failure (at most 3 times in 2 minutes). */
+    private fun recover(reason: String) {
+        recovering = false
+        if (tun == null) return
+        val now = System.currentTimeMillis()
+        while (recoveries.isNotEmpty() && now - recoveries.first() > 120_000) recoveries.removeFirst()
+        if (recoveries.size >= 3) {
+            BoostState.update { it.copy(error = "The boost kept failing ($reason) and was stopped.") }
+            stopBoost(userRequested = false)
+            return
+        }
+        recoveries.addLast(now)
+        Log.w(TAG, "recovering: $reason")
+        try {
+            val lm = links ?: return
+            val bal = balancer ?: return
+            if (relay?.alive != true) {
+                relay?.stop()
+                relay = RelayServer(lm, bal) { n -> mobilePending.addAndGet(n) }.also { it.start() }
+            }
+            establishTunnel(useProxy = proxyActive && settings.current.adguardProxy)
+        } catch (e: Exception) {
+            Log.e(TAG, "recovery failed", e)
+            BoostState.update { it.copy(error = e.message ?: "Could not recover") }
+            stopBoost(userRequested = false)
+        }
     }
 
     private fun publishLinks() {
@@ -402,12 +506,15 @@ class BoostVpnService : VpnService() {
                 mobileCapReached = capReached,
             )
         }
-        if (!engineAlive) {
-            BoostState.update { it.copy(error = "The tunnel stopped unexpectedly.") }
-            worker.execute { stopBoost(userRequested = false) }
+        val relayAlive = relay?.alive == true
+        if ((!engineAlive || !relayAlive) && !recovering) {
+            recovering = true
+            val reason = if (!engineAlive) "tunnel engine stopped" else "relay stopped"
+            worker.execute { recover(reason) }
             return
         }
         if (tickCount % 3 == 0) watchTunnel()
+        if (tickCount % PROBE_EVERY_TICKS == 0) requestProbe()
         if (++tickCount % 2 == 0) {
             runCatching { DualBoostApp.notify(this, NOTIF_ID, buildNotification(BoostState.ui.value)) }
         }
@@ -473,6 +580,9 @@ class BoostVpnService : VpnService() {
         private const val NOTIF_ID = 7
         private const val MTU = 8500
         private const val HISTORY = 60
+        private const val PROBE_EVERY_TICKS = 10
+        private const val PROBE_TIMEOUT_MS = 2_500
+        private val PROBE_TARGETS = listOf("1.1.1.1", "8.8.8.8")
         private const val TUN_V4 = "198.18.0.1"
         private const val TUN_V6 = "fd00:d0a1:b005::1"
         private val LOCAL_RANGES = listOf(

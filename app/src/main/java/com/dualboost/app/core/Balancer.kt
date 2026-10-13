@@ -30,9 +30,15 @@ class Balancer(
         val up = links.all.filter { it.isUp }
         if (up.size <= 1) return up
 
-        // Prefer validated links (real internet) over ones stuck behind a login page.
+        // Prefer links with confirmed internet (Android-validated and passing our probe),
+        // then validated ones, then anything that is up.
+        val good = up.filter { it.isGood }
         val validated = up.filter { it.validated }
-        val pool = if (validated.isNotEmpty()) validated else up
+        val pool = when {
+            good.isNotEmpty() -> good
+            validated.isNotEmpty() -> validated
+            else -> up
+        }
         val wifi = links.wifi
         val mobile = links.mobile
 
@@ -43,7 +49,7 @@ class Balancer(
             pool.size == 1 -> pool[0]
             s.mode == BoostMode.BACKUP || capHit ->
                 if (!wifi.inPenalty(now)) wifi else mobile
-            udp && port == 53 -> if (!wifi.inPenalty(now)) wifi else mobile // DNS: lowest latency
+            udp && port == 53 -> fastest(wifi, mobile, now) // DNS: lowest latency
             else -> {
                 val pinned = if (s.stickySites && dst != null) sticky[dst] else null
                 if (pinned != null && pinned.until > now) {
@@ -59,7 +65,7 @@ class Balancer(
         if (sticky.size > 4096) sticky.entries.removeIf { it.value.until < now }
 
         val rest = up.filter { it !== primary }
-            .sortedBy { if (it.validated) 0 else 1 }
+            .sortedBy { if (it.isGood) 0 else if (it.validated) 1 else 2 }
         return listOf(primary) + rest
     }
 
@@ -75,6 +81,14 @@ class Balancer(
         // Exploration: every 8th new connection goes to the other link, so a link whose
         // estimate is low (or out of date) is re-measured and can win traffic back.
         return if (decisions.incrementAndGet() % EXPLORE_EVERY == 0) (if (best === wifi) mobile else wifi) else best
+    }
+
+    /** Lower measured latency wins; Wi-Fi when unknown or close. */
+    private fun fastest(wifi: Link, mobile: Link, now: Long): Link {
+        if (wifi.inPenalty(now) && !mobile.inPenalty(now)) return mobile
+        if (mobile.inPenalty(now)) return wifi
+        val w = wifi.rttMs; val m = mobile.rttMs
+        return if (w > 0 && m > 0 && m * 1.3 < w) mobile else wifi
     }
 
     private fun expected(link: Link, now: Long): Double =

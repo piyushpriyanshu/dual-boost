@@ -21,10 +21,16 @@ class Flow(val link: Link, val udp: Boolean) {
     @Volatile var lastTickBytes = 0L
     /** Bytes moved during the last tick window. */
     @Volatile var recent = 0L
+    /** Closes this flow's outgoing socket(s); used to drop flows instantly when their link goes away. */
+    @Volatile var closer: (() -> Unit)? = null
 
-    /** A flow counts as "heavy" while it is new or actively moving data. */
+    /**
+     * A flow counts as "heavy" while it is new (TCP only) or actively moving data.
+     * New UDP sessions (mostly DNS lookups) don't count until they carry real traffic,
+     * so name lookups don't skew the balance.
+     */
     fun isHeavy(now: Long): Boolean =
-        now - startedAt < NEW_FLOW_MS || recent >= HEAVY_BYTES_PER_SEC
+        (!udp && now - startedAt < NEW_FLOW_MS) || recent >= HEAVY_BYTES_PER_SEC
 
     companion object {
         const val NEW_FLOW_MS = 3_000L
@@ -53,7 +59,20 @@ class Link(val type: LinkType) {
     @Volatile var failStreak = 0
     @Volatile var lastFailAt = 0L
 
+    /**
+     * Result of DualBoost's own internet probe. Android's "validated" flag can take minutes to
+     * notice a dead connection (e.g. Wi-Fi connected but the router lost internet); the probe
+     * notices within seconds.
+     */
+    @Volatile var healthy = true
+    @Volatile var probeFailures = 0
+    /** Last measured connect time to the internet in ms (-1 = unknown). */
+    @Volatile var rttMs = -1
+
     val isUp: Boolean get() = network != null
+
+    /** Up, confirmed by Android, and passing DualBoost's own probe. */
+    val isGood: Boolean get() = network != null && validated && healthy
 
     fun heavyFlows(now: Long): Int = flows.count { it.isHeavy(now) }
 
@@ -74,6 +93,9 @@ class Link(val type: LinkType) {
         rxRate = 0.0; txRate = 0.0
         capacity = INITIAL_CAPACITY
         failStreak = 0
+        healthy = true
+        probeFailures = 0
+        rttMs = -1
     }
 
     companion object {
@@ -114,6 +136,8 @@ class LinkMonitor(context: Context, private val onChange: () -> Unit) {
             override fun onAvailable(network: Network) {
                 link.network = network
                 link.failStreak = 0
+                link.healthy = true
+                link.probeFailures = 0
                 cm.getNetworkCapabilities(network)?.let { applyCaps(link, it) }
                 cm.getLinkProperties(network)?.let { applyLp(link, it) }
                 Log.i(TAG, "${link.type} available: $network")
