@@ -21,7 +21,7 @@ import com.dualboost.app.core.Balancer
 import com.dualboost.app.core.BoostSettings
 import com.dualboost.app.core.BoostState
 import com.dualboost.app.core.BoostUi
-import com.dualboost.app.core.Companion
+import com.dualboost.app.core.AddOns
 import com.dualboost.app.core.ProxyStatus
 import com.dualboost.app.core.Link
 import com.dualboost.app.core.LinkMonitor
@@ -122,7 +122,7 @@ class BoostVpnService : VpnService() {
             relay = rs
             rs.start()
 
-            val wantProxy = s.adguardProxy && Companion.proxyReachable(s.adguardPort)
+            val wantProxy = s.adguardProxy && AddOns.proxyReachable(s.adguardPort)
             establishTunnel(useProxy = wantProxy)
 
             resetStats(lm)
@@ -166,7 +166,7 @@ class BoostVpnService : VpnService() {
         val rs = relay ?: throw IllegalStateException("not running")
         val up = lm.all.filter { it.isUp }
         val useV6 = s.ipv6 && up.isNotEmpty() && up.all { it.hasIpv6 }
-        val dns = Companion.dnsServers(s, useV6)
+        val dns = AddOns.dnsServers(s, useV6)
 
         val b = Builder()
             .setSession(getString(R.string.app_name))
@@ -184,7 +184,7 @@ class BoostVpnService : VpnService() {
         b.addDisallowedApplication(packageName)
         for (pkg in s.excludedApps) {
             // AdGuard must stay inside the boost when chaining, otherwise its traffic isn't combined.
-            if (useProxy && pkg in Companion.ADGUARD_PACKAGES) continue
+            if (useProxy && pkg in AddOns.ADGUARD_PACKAGES) continue
             runCatching { b.addDisallowedApplication(pkg) }
         }
         if (useProxy) b.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", s.adguardPort))
@@ -259,7 +259,7 @@ class BoostVpnService : VpnService() {
     private fun watchTunnel() {
         val s = settings.current
         if (s.adguardProxy) {
-            val reachable = Companion.proxyReachable(s.adguardPort)
+            val reachable = AddOns.proxyReachable(s.adguardPort)
             if (proxyActive && !reachable) {
                 // AdGuard went away: drop the proxy so browsing keeps working.
                 if (++proxyMisses >= 2) scheduleRebuild(useProxy = false)

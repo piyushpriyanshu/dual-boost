@@ -9,7 +9,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 
 /** Helpers for working alongside the AdGuard app and for the DNS choice. */
-object Companion {
+object AddOns {
 
     /** Known AdGuard app packages (Play Store "content blocker" build and the full APK build). */
     val ADGUARD_PACKAGES = listOf("com.adguard.android", "com.adguard.android.contentblocker")

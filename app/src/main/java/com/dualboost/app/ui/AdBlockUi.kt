@@ -30,7 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dualboost.app.R
 import com.dualboost.app.core.BoostUi
-import com.dualboost.app.core.Companion
+import com.dualboost.app.core.AddOns
 import com.dualboost.app.core.DnsMode
 import com.dualboost.app.core.Phase
 import com.dualboost.app.core.ProxyStatus
@@ -53,7 +53,7 @@ private fun rememberProxyDetected(enabled: Boolean, port: Int): Boolean? {
     LaunchedEffect(enabled, port) {
         if (!enabled) { detected = null; return@LaunchedEffect }
         while (true) {
-            detected = withContext(Dispatchers.IO) { Companion.proxyReachable(port) }
+            detected = withContext(Dispatchers.IO) { AddOns.proxyReachable(port) }
             delay(2_000)
         }
     }
@@ -106,7 +106,7 @@ fun AdBlockSection(
 ) {
     val c = Db.colors
     val context = LocalContext.current
-    val adguardPkg = remember { Companion.adguardInstalled(context) }
+    val adguardPkg = remember { AddOns.adguardInstalled(context) }
     val detected = rememberProxyDetected(s.adguardProxy, s.adguardPort)
 
     SectionHeader("Ad blocking · DNS")
@@ -121,7 +121,7 @@ fun AdBlockSection(
                     initial = s.customDns,
                     placeholder = "e.g. 9.9.9.9, 149.112.112.112",
                     numeric = false,
-                    valid = { Companion.parseDns(it).isNotEmpty() },
+                    valid = { AddOns.parseDns(it).isNotEmpty() },
                 ) { v -> onChange { it.copy(customDns = v) } }
             }
         }
@@ -153,7 +153,7 @@ fun AdBlockSection(
         RowDivider()
         if (adguardPkg != null) {
             ChevronRow("Open AdGuard", "Switch its routing mode to Manual proxy", R.drawable.ic_shield, c.good) {
-                Companion.openAdguard(context)
+                AddOns.openAdguard(context)
             }
         } else {
             SettingRow("AdGuard isn't installed", "Install it from adguard.com, or use AdGuard DNS above", R.drawable.ic_info, c.warn)
