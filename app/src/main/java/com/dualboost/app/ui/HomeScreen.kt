@@ -84,6 +84,8 @@ fun HomeScreen(
         ) {
             // ---- Header
             Row(Modifier.fillMaxWidth().padding(top = Db.s3), verticalAlignment = Alignment.CenterVertically) {
+                AppIcon(36.dp)
+                Spacer(Modifier.width(Db.s3))
                 Text("DualBoost", color = c.ink, style = Db.h1)
                 Spacer(Modifier.weight(1f))
                 RoundIconButton(R.drawable.ic_settings, "Settings", onOpenSettings)

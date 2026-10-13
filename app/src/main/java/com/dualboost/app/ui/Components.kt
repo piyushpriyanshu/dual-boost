@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -493,5 +494,26 @@ fun TopBar(title: String, onBack: () -> Unit) {
         RoundIconButton(R.drawable.ic_back, "Back", onBack)
         Spacer(Modifier.width(14.dp))
         Text(title, color = c.ink, style = Db.h1, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/**
+ * The DualBoost launcher icon (dark tile, blue/orange ring, white bolt) drawn in-app.
+ * A faint outline keeps the tile visible on the dark background.
+ */
+@Composable
+fun AppIcon(size: Dp) {
+    val c = Db.colors
+    val shape = RoundedCornerShape(size * 0.3f)
+    Box(
+        Modifier.size(size).clip(shape).background(Color(0xFF0E0F12))
+            .then(if (c.dark) Modifier.border(1.dp, c.faint, shape) else Modifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        androidx.compose.foundation.Image(
+            painterResource(R.drawable.ic_launcher_foreground), contentDescription = null,
+            // The artwork sits in the middle of a 108-unit canvas; enlarge it to fill the tile.
+            modifier = Modifier.size(size).graphicsLayer(scaleX = 1.5f, scaleY = 1.5f),
+        )
     }
 }
