@@ -63,13 +63,18 @@ class Balancer(
         return listOf(primary) + rest
     }
 
+    private val decisions = java.util.concurrent.atomic.AtomicInteger()
+
     private fun pickBest(now: Long, wifi: Link, mobile: Link): Link {
         if (wifi.inPenalty(now) && !mobile.inPenalty(now)) return mobile
         if (mobile.inPenalty(now) && !wifi.inPenalty(now)) return wifi
         val ew = expected(wifi, now)
         // Small bias toward Wi-Fi: it is free and usually lower latency.
         val em = expected(mobile, now) * MOBILE_BIAS
-        return if (ew >= em) wifi else mobile
+        val best = if (ew >= em) wifi else mobile
+        // Exploration: every 8th new connection goes to the other link, so a link whose
+        // estimate is low (or out of date) is re-measured and can win traffic back.
+        return if (decisions.incrementAndGet() % EXPLORE_EVERY == 0) (if (best === wifi) mobile else wifi) else best
     }
 
     private fun expected(link: Link, now: Long): Double =
@@ -80,5 +85,6 @@ class Balancer(
     companion object {
         private const val STICKY_MS = 10 * 60_000L
         private const val MOBILE_BIAS = 0.9
+        private const val EXPLORE_EVERY = 8
     }
 }

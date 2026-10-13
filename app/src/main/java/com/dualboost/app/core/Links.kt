@@ -79,7 +79,7 @@ class Link(val type: LinkType) {
     companion object {
         /** 8 Mbps starting guess for both links, so new connections alternate at first. */
         const val INITIAL_CAPACITY = 1_000_000.0
-        const val MIN_CAPACITY = 125_000.0
+        const val MIN_CAPACITY = 8_000.0
     }
 }
 

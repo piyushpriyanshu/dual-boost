@@ -272,10 +272,15 @@ class BoostVpnService : VpnService() {
             }
             val heavy = l.heavyFlows(now)
 
-            // Learn capacity: jump up immediately, drift down slowly only while the link is busy.
+            // Learn capacity from what the link actually delivers:
+            //  • rises immediately whenever the link moves more data than estimated;
+            //  • sinks quickly (30% per second) while it carries young connections (2–6 s old,
+            //    i.e. ramping up) yet moves less than estimated — a slow or throttled link is
+            //    recognised within a few seconds. Idle links keep their estimate.
+            val ramping = l.flows.any { val age = now - it.startedAt; age in 2_000..6_000 }
             l.capacity = when {
                 rxRate > l.capacity -> rxRate
-                heavy > 0 -> (l.capacity * 0.97 + rxRate * 0.03).coerceAtLeast(Link.MIN_CAPACITY)
+                ramping -> (l.capacity * 0.7 + rxRate * 0.3).coerceAtLeast(Link.MIN_CAPACITY)
                 else -> l.capacity
             }
             l.rxRate = l.rxRate * 0.4 + rxRate * 0.6
