@@ -108,14 +108,15 @@ fun HomeScreen(
                     Banner("Boost stopped", ui.error ?: "", "Dismiss", onDismissError)
                 }
             }
-            val mobileMissing = (on && ui.mobile.status == LinkStatus.OFF && ui.wifi.status != LinkStatus.OFF) ||
-                (!on && !busy && idle.wifi && !idle.mobile)
+            // Only warn once the boost has had time to wake mobile data up itself.
+            val mobileMissing = on && now - ui.startedAt > 6_000 &&
+                ui.mobile.status == LinkStatus.OFF && ui.wifi.status != LinkStatus.OFF
             AnimatedVisibility(mobileMissing, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
                 Column {
                     Spacer(Modifier.height(Db.s3))
                     Banner(
                         "Mobile data isn't active",
-                        "Turn on Mobile data, and keep \"Mobile data always active\" on in Developer options, so both connections can run together.",
+                        "Turn on Mobile data in quick settings. If it is already on, switch on \"Mobile data always active\" in Developer options.",
                         "Open Developer options", onOpenDeveloperOptions,
                     )
                 }

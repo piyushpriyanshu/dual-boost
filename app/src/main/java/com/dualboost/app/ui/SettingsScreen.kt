@@ -178,7 +178,7 @@ fun SettingsScreen(
             Hairline()
             ChevronRow(
                 "Mobile data always active",
-                "Must stay on (Developer options) so mobile data works next to Wi-Fi.",
+                "Recommended (Developer options): keeps mobile data ready next to Wi-Fi.",
                 onClick = onDeveloper,
             )
         }
