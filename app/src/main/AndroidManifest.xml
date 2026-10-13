@@ -17,9 +17,6 @@
 
     <!-- Lets the app list launchable apps for the "Excluded apps" screen. -->
     <queries>
-        <!-- AdGuard companion detection -->
-        <package android:name="com.adguard.android" />
-        <package android:name="com.adguard.android.contentblocker" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />

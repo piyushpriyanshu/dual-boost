@@ -7,7 +7,6 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.IpPrefix
 import android.net.Network
-import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -22,7 +21,6 @@ import com.dualboost.app.core.BoostSettings
 import com.dualboost.app.core.BoostState
 import com.dualboost.app.core.BoostUi
 import com.dualboost.app.core.AddOns
-import com.dualboost.app.core.ProxyStatus
 import com.dualboost.app.core.Link
 import com.dualboost.app.core.LinkMonitor
 import com.dualboost.app.core.LinkStatus
@@ -123,8 +121,7 @@ class BoostVpnService : VpnService() {
             relay = rs
             rs.start()
 
-            val wantProxy = s.adguardProxy && AddOns.proxyReachable(s.adguardPort)
-            establishTunnel(useProxy = wantProxy)
+            establishTunnel()
 
             resetStats(lm)
             ticker = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "boost-stats") }.also {
@@ -135,7 +132,7 @@ class BoostVpnService : VpnService() {
                 it.copy(phase = Phase.ON, startedAt = System.currentTimeMillis(), error = null, peakMbps = 0.0)
             }
             publishLinks()
-            Log.i(TAG, "boost started (ipv6=$tunV6, proxy=$proxyActive, relay port=${rs.port})")
+            Log.i(TAG, "boost started (ipv6=$tunV6, relay port=${rs.port})")
         } catch (e: Exception) {
             Log.e(TAG, "start failed", e)
             teardown()
@@ -147,21 +144,19 @@ class BoostVpnService : VpnService() {
 
     // ------------------------------------------------------------------ tunnel (re)build
 
-    @Volatile private var proxyActive = false
-    private var proxyMisses = 0
     private var tunV6 = false
     /** Settings the current tunnel was built with; a change triggers a quick rebuild. */
     @Volatile private var builtWith: String = ""
     @Volatile private var rebuildPending = false
 
-    private fun tunnelSignature(s: com.dualboost.app.core.SettingsSnapshot, proxy: Boolean) =
-        listOf(s.dnsMode, s.customDns.trim(), proxy, s.adguardPort, s.excludedApps.sorted(), s.treatAsWifi, s.ipv6).toString()
+    private fun tunnelSignature(s: com.dualboost.app.core.SettingsSnapshot) =
+        listOf(s.dnsMode, s.customDns.trim(), s.excludedApps.sorted(), s.treatAsWifi, s.ipv6).toString()
 
     /**
      * Builds (or rebuilds) the VPN interface and (re)starts the engine on it.
      * Rebuilding replaces the interface in place; the relay and link monitoring keep running.
      */
-    private fun establishTunnel(useProxy: Boolean) {
+    private fun establishTunnel() {
         val s = settings.current
         val lm = links ?: throw IllegalStateException("not running")
         val rs = relay ?: throw IllegalStateException("not running")
@@ -183,12 +178,7 @@ class BoostVpnService : VpnService() {
             }
         }
         b.addDisallowedApplication(packageName)
-        for (pkg in s.excludedApps) {
-            // AdGuard must stay inside the boost when chaining, otherwise its traffic isn't combined.
-            if (useProxy && pkg in AddOns.ADGUARD_PACKAGES) continue
-            runCatching { b.addDisallowedApplication(pkg) }
-        }
-        if (useProxy) b.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", s.adguardPort))
+        for (pkg in s.excludedApps) runCatching { b.addDisallowedApplication(pkg) }
         b.setMetered(!s.treatAsWifi)
         b.setUnderlyingNetworks(underlying())
         b.setConfigureIntent(openAppIntent())
@@ -223,31 +213,20 @@ class BoostVpnService : VpnService() {
             throw IllegalStateException("The tunnel engine failed to start.")
         }
         tunV6 = useV6
-        proxyActive = useProxy
-        proxyMisses = 0
-        builtWith = tunnelSignature(s, s.adguardProxy)
-        BoostState.update {
-            it.copy(
-                proxy = when {
-                    useProxy -> ProxyStatus.ACTIVE
-                    s.adguardProxy -> ProxyStatus.WAITING
-                    else -> ProxyStatus.OFF
-                },
-                dnsInUse = dns,
-            )
-        }
+        builtWith = tunnelSignature(s)
+        BoostState.update { it.copy(dnsInUse = dns) }
     }
 
     /** Rebuilds the tunnel on the control thread; failures stop the boost cleanly. */
-    private fun scheduleRebuild(useProxy: Boolean) {
+    private fun scheduleRebuild() {
         if (rebuildPending) return
         rebuildPending = true
         worker.execute {
             rebuildPending = false
             if (tun == null) return@execute
             try {
-                establishTunnel(useProxy)
-                Log.i(TAG, "tunnel rebuilt (proxy=$useProxy)")
+                establishTunnel()
+                Log.i(TAG, "tunnel rebuilt")
             } catch (e: Exception) {
                 Log.e(TAG, "rebuild failed", e)
                 BoostState.update { it.copy(error = e.message ?: "Could not apply the change") }
@@ -256,22 +235,9 @@ class BoostVpnService : VpnService() {
         }
     }
 
-    /** Called every few seconds: applies setting changes live and watches the AdGuard proxy. */
+    /** Called every few seconds: applies setting changes live by rebuilding the tunnel. */
     private fun watchTunnel() {
-        val s = settings.current
-        if (s.adguardProxy) {
-            val reachable = AddOns.proxyReachable(s.adguardPort)
-            if (proxyActive && !reachable) {
-                // AdGuard went away: drop the proxy so browsing keeps working.
-                if (++proxyMisses >= 2) scheduleRebuild(useProxy = false)
-                return
-            }
-            proxyMisses = 0
-            if (!proxyActive && reachable) { scheduleRebuild(useProxy = true); return }
-        } else if (proxyActive) {
-            scheduleRebuild(useProxy = false); return
-        }
-        if (tunnelSignature(s, s.adguardProxy) != builtWith) scheduleRebuild(useProxy = proxyActive && s.adguardProxy)
+        if (tunnelSignature(settings.current) != builtWith) scheduleRebuild()
     }
 
     private fun stopBoost(userRequested: Boolean) {
@@ -288,7 +254,6 @@ class BoostVpnService : VpnService() {
     private fun teardown() {
         recovering = false
         recoveries.clear()
-        proxyActive = false
         builtWith = ""
         ticker?.shutdownNow(); ticker = null
         runCatching { if (TunnelNative.TProxyIsRunning()) TunnelNative.TProxyStopService() }
@@ -414,7 +379,7 @@ class BoostVpnService : VpnService() {
                 relay?.stop()
                 relay = RelayServer(lm, bal) { n -> mobilePending.addAndGet(n) }.also { it.start() }
             }
-            establishTunnel(useProxy = proxyActive && settings.current.adguardProxy)
+            establishTunnel()
         } catch (e: Exception) {
             Log.e(TAG, "recovery failed", e)
             BoostState.update { it.copy(error = e.message ?: "Could not recover") }

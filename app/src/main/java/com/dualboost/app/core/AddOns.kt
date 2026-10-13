@@ -1,36 +1,10 @@
 package com.dualboost.app.core
 
-import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.InetAddresses
 import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.Socket
 
-/** Helpers for working alongside the AdGuard app and for the DNS choice. */
+/** Helpers for the DNS choice. */
 object AddOns {
-
-    /** Known AdGuard app packages (Play Store "content blocker" build and the full APK build). */
-    val ADGUARD_PACKAGES = listOf("com.adguard.android", "com.adguard.android.contentblocker")
-
-    fun adguardInstalled(context: Context): String? = ADGUARD_PACKAGES.firstOrNull {
-        try { context.packageManager.getPackageInfo(it, 0); true } catch (e: PackageManager.NameNotFoundException) { false }
-    }
-
-    fun openAdguard(context: Context): Boolean {
-        val pkg = adguardInstalled(context) ?: return false
-        val intent = context.packageManager.getLaunchIntentForPackage(pkg) ?: return false
-        return runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess
-    }
-
-    /** True if something (AdGuard) is accepting connections on 127.0.0.1:[port]. */
-    fun proxyReachable(port: Int, timeoutMs: Int = 400): Boolean = try {
-        Socket().use { it.connect(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), timeoutMs) }
-        true
-    } catch (e: Exception) {
-        false
-    }
 
     /** Parses user-entered DNS IPs. Only numeric addresses are accepted (no lookups). */
     fun parseDns(text: String): List<InetAddress> =

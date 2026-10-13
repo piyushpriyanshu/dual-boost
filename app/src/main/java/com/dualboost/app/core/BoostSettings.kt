@@ -55,10 +55,6 @@ data class SettingsSnapshot(
     val dnsMode: DnsMode = DnsMode.STANDARD,
     /** Custom DNS server IPs, separated by commas or spaces (used with [DnsMode.CUSTOM]). */
     val customDns: String = "",
-    /** Pass app traffic through the AdGuard app's local proxy (AdGuard in "Manual proxy" mode). */
-    val adguardProxy: Boolean = false,
-    /** Port of the AdGuard local proxy. */
-    val adguardPort: Int = 8080,
 )
 
 /** Persistent settings + mobile usage counter. Single instance per process. */
@@ -86,8 +82,6 @@ class BoostSettings private constructor(context: Context) {
         dnsMode = runCatching { DnsMode.valueOf(prefs.getString(K_DNS, null) ?: "STANDARD") }
             .getOrDefault(DnsMode.STANDARD),
         customDns = prefs.getString(K_DNS_CUSTOM, "") ?: "",
-        adguardProxy = prefs.getBoolean(K_AGP, false),
-        adguardPort = prefs.getInt(K_AGP_PORT, 8080),
     )
 
     fun update(block: (SettingsSnapshot) -> SettingsSnapshot) {
@@ -104,8 +98,7 @@ class BoostSettings private constructor(context: Context) {
             .putBoolean(K_AUTOUPD, next.autoUpdate)
             .putString(K_DNS, next.dnsMode.name)
             .putString(K_DNS_CUSTOM, next.customDns)
-            .putBoolean(K_AGP, next.adguardProxy)
-            .putInt(K_AGP_PORT, next.adguardPort)
+
             .apply()
         _state.value = next
     }
@@ -152,8 +145,6 @@ class BoostSettings private constructor(context: Context) {
         private const val K_AUTOUPD = "auto_update"
         private const val K_DNS = "dns_mode"
         private const val K_DNS_CUSTOM = "dns_custom"
-        private const val K_AGP = "adguard_proxy"
-        private const val K_AGP_PORT = "adguard_port"
 
         @Volatile private var instance: BoostSettings? = null
 

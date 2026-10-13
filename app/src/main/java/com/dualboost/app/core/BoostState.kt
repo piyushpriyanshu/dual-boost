@@ -8,9 +8,6 @@ enum class Phase { OFF, STARTING, ON, STOPPING }
 
 enum class LinkStatus { OFF, NO_INTERNET, READY }
 
-/** AdGuard local-proxy chaining state. */
-enum class ProxyStatus { OFF, ACTIVE, WAITING }
-
 data class LinkUi(
     val status: LinkStatus = LinkStatus.OFF,
     /** Megabits per second. */
@@ -32,8 +29,6 @@ data class BoostUi(
     val mobileCapReached: Boolean = false,
     val startedAt: Long = 0,
     val error: String? = null,
-    /** AdGuard proxy chaining status while running. */
-    val proxy: ProxyStatus = ProxyStatus.OFF,
     /** DNS servers actually in use (for display). */
     val dnsInUse: List<String> = emptyList(),
 ) {
