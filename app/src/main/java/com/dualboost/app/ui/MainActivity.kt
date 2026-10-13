@@ -71,7 +71,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val settings = BoostSettings.get(this)
         if (BoostState.ui.value.phase == Phase.OFF) {
-            BoostState.update { it.copy(mobileTodayBytes = settings.mobileUsedToday()) }
+            BoostState.update {
+                it.copy(mobileTodayBytes = settings.mobileUsedToday(), wifiTodayBytes = settings.wifiUsedToday())
+            }
         }
         handleIntent(intent)
         setContent {
@@ -193,6 +195,7 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
         }
     }
 
+    androidx.compose.runtime.CompositionLocalProvider(LocalSpeedUnit provides s.speedUnit) {
     Box(Modifier.fillMaxSize().background(Db.colors.bg)) {
         AnimatedContent(
             targetState = screen,
@@ -257,6 +260,7 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
                 )
             }
         }
+    }
     }
 }
 

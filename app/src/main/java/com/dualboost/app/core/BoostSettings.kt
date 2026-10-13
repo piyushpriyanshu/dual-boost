@@ -21,6 +21,9 @@ enum class UpdateCheck(val label: String, val hours: Long) {
     val onOpen: Boolean get() = this != MANUAL
 }
 
+/** How speeds are shown. AUTO switches to Kbps below 1 Mbps. */
+enum class SpeedUnit(val label: String) { MBPS("Mbps"), KBPS("Kbps"), AUTO("Auto") }
+
 /** Which DNS servers the boost uses. AdGuard options block ads and trackers at the DNS level. */
 enum class DnsMode(val label: String, val v4: List<String>, val v6: List<String>) {
     STANDARD("Standard", listOf("1.1.1.1", "8.8.8.8"), listOf("2606:4700:4700::1111", "2001:4860:4860::8888")),
@@ -55,6 +58,8 @@ data class SettingsSnapshot(
     val dnsMode: DnsMode = DnsMode.STANDARD,
     /** Custom DNS server IPs, separated by commas or spaces (used with [DnsMode.CUSTOM]). */
     val customDns: String = "",
+    /** Unit used to display speeds everywhere (app, notification, Quick Settings tile). */
+    val speedUnit: SpeedUnit = SpeedUnit.MBPS,
 )
 
 /** Persistent settings + mobile usage counter. Single instance per process. */
@@ -82,6 +87,8 @@ class BoostSettings private constructor(context: Context) {
         dnsMode = runCatching { DnsMode.valueOf(prefs.getString(K_DNS, null) ?: "STANDARD") }
             .getOrDefault(DnsMode.STANDARD),
         customDns = prefs.getString(K_DNS_CUSTOM, "") ?: "",
+        speedUnit = runCatching { SpeedUnit.valueOf(prefs.getString(K_UNIT, null) ?: "MBPS") }
+            .getOrDefault(SpeedUnit.MBPS),
     )
 
     fun update(block: (SettingsSnapshot) -> SettingsSnapshot) {
@@ -98,6 +105,7 @@ class BoostSettings private constructor(context: Context) {
             .putBoolean(K_AUTOUPD, next.autoUpdate)
             .putString(K_DNS, next.dnsMode.name)
             .putString(K_DNS_CUSTOM, next.customDns)
+            .putString(K_UNIT, next.speedUnit.name)
 
             .apply()
         _state.value = next
@@ -118,10 +126,23 @@ class BoostSettings private constructor(context: Context) {
         prefs.edit().putLong(K_USED, prefs.getLong(K_USED, 0L) + bytes).apply()
     }
 
+    @Synchronized
+    fun wifiUsedToday(): Long {
+        rollDay()
+        return prefs.getLong(K_WIFI_USED, 0L)
+    }
+
+    @Synchronized
+    fun addWifiUsage(bytes: Long) {
+        if (bytes <= 0) return
+        rollDay()
+        prefs.edit().putLong(K_WIFI_USED, prefs.getLong(K_WIFI_USED, 0L) + bytes).apply()
+    }
+
     private fun rollDay() {
         val today = LocalDate.now().toString()
         if (prefs.getString(K_DAY, null) != today) {
-            prefs.edit().putString(K_DAY, today).putLong(K_USED, 0L).apply()
+            prefs.edit().putString(K_DAY, today).putLong(K_USED, 0L).putLong(K_WIFI_USED, 0L).apply()
         }
     }
 
@@ -145,6 +166,8 @@ class BoostSettings private constructor(context: Context) {
         private const val K_AUTOUPD = "auto_update"
         private const val K_DNS = "dns_mode"
         private const val K_DNS_CUSTOM = "dns_custom"
+        private const val K_UNIT = "speed_unit"
+        private const val K_WIFI_USED = "wifi_used"
 
         @Volatile private var instance: BoostSettings? = null
 

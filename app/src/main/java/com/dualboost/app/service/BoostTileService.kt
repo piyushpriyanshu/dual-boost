@@ -10,7 +10,8 @@ import android.service.quicksettings.TileService
 import com.dualboost.app.core.BoostState
 import com.dualboost.app.core.Phase
 import com.dualboost.app.ui.MainActivity
-import com.dualboost.app.ui.formatMbps
+import com.dualboost.app.ui.formatSpeed
+import com.dualboost.app.core.BoostSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -44,7 +45,7 @@ class BoostTileService : TileService() {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             tile.subtitle = when (ui.phase) {
-                Phase.ON -> "${formatMbps(ui.totalDown)} Mbps"
+                Phase.ON -> formatSpeed(ui.totalDown, BoostSettings.get(this).current.speedUnit).toString()
                 Phase.STARTING -> "Starting…"
                 else -> "Off"
             }

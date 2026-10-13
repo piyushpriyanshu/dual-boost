@@ -26,6 +26,7 @@ data class BoostUi(
     val mobileHistory: List<Float> = emptyList(),
     val peakMbps: Double = 0.0,
     val mobileTodayBytes: Long = 0,
+    val wifiTodayBytes: Long = 0,
     val mobileCapReached: Boolean = false,
     val startedAt: Long = 0,
     val error: String? = null,

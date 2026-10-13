@@ -137,39 +137,41 @@ fun ValueWithUnit(value: String, unit: String?, style: TextStyle, color: Color =
 
 // ---------------------------------------------------------------- primary button
 
+/**
+ * The main Start/Stop pill: solid [color] (Wi-Fi blue to start, mobile orange to stop),
+ * cross-fading when the state changes.
+ */
 @Composable
 fun MainButton(
     text: String,
     @DrawableRes icon: Int?,
-    prominent: Boolean,
+    color: Color,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
-    val c = Db.colors
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.97f else 1f, spring(stiffness = 700f), label = "press")
-    val fg by animateColorAsState(if (prominent) Color.White else c.ink, tween(250), label = "fg")
+    val bg by animateColorAsState(color, tween(350), label = "bg")
+    val alpha by animateFloatAsState(if (enabled) 1f else 0.75f, tween(200), label = "alpha")
     val shape = RoundedCornerShape(50)
-    val bg = if (prominent) Modifier.background(Brush.horizontalGradient(listOf(c.wifi, c.mobile)), shape)
-    else Modifier.background(c.surfaceHigh, shape)
     Row(
         modifier
             .scale(scale)
             .height(60.dp)
             .clip(shape)
-            .then(bg)
+            .background(bg.copy(alpha = alpha), shape)
             .clickable(source, null, enabled = enabled, role = Role.Button, onClick = onClick)
             .padding(horizontal = Db.s6),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
-            Icon(painterResource(icon), null, tint = fg, modifier = Modifier.size(20.dp))
+            Icon(painterResource(icon), null, tint = Color.White, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(10.dp))
         }
-        Text(text, color = fg, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        Text(text, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
     }
 }
 

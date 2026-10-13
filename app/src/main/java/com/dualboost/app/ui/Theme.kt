@@ -72,6 +72,16 @@ private val Light = DbColors(
 
 val LocalDb = staticCompositionLocalOf { Dark }
 
+/** The user's chosen speed unit, provided once at the top of the UI. */
+val LocalSpeedUnit = androidx.compose.runtime.compositionLocalOf { com.dualboost.app.core.SpeedUnit.MBPS }
+
+/** Shrinks a number style as the text gets longer (e.g. "78,400" in Kbps) so it always fits. */
+fun TextStyle.fitted(text: String, fitsUpTo: Int, minScale: Float = 0.7f): TextStyle {
+    if (text.length <= fitsUpTo) return this
+    val scale = (fitsUpTo.toFloat() / text.length).coerceAtLeast(minScale)
+    return copy(fontSize = fontSize * scale, lineHeight = if (lineHeight.isSp) lineHeight * scale else lineHeight)
+}
+
 object Db {
     val colors: DbColors @Composable get() = LocalDb.current
 

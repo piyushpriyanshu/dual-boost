@@ -1,5 +1,6 @@
 package com.dualboost.app.ui
 
+import com.dualboost.app.core.SpeedUnit
 import java.util.Locale
 
 /** 0.0 – 99.9 with one decimal, larger values as whole numbers. */
@@ -23,4 +24,19 @@ fun formatDuration(ms: Long): String {
     val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60
     return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, sec)
     else String.format(Locale.US, "%02d:%02d", m, sec)
+}
+
+/** A speed split into number and unit, so the UI can style them separately. */
+data class Speed(val value: String, val unit: String) {
+    override fun toString() = "$value $unit"
+}
+
+/** Formats a speed given in Mbps according to the user's chosen unit. */
+fun formatSpeed(mbps: Double, unit: SpeedUnit): Speed {
+    val x = if (mbps.isFinite() && mbps > 0) mbps else 0.0
+    val kbps = unit == SpeedUnit.KBPS || (unit == SpeedUnit.AUTO && x > 0 && x < 1.0)
+    if (!kbps) return Speed(formatMbps(x), "Mbps")
+    val k = x * 1000
+    val v = if (k < 10) String.format(Locale.US, "%.1f", k) else String.format(Locale.US, "%,d", Math.round(k))
+    return Speed(v, "Kbps")
 }

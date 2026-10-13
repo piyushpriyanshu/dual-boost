@@ -105,7 +105,9 @@ fun HomeScreen(
             Spacer(Modifier.height(Db.s3))
             ChartCard(ui, on)
             Spacer(Modifier.height(Db.s3))
-            StatsCard(ui, on, now, settings.mobileCapMb)
+            StatsCard(ui, on, now)
+            Spacer(Modifier.height(Db.s3))
+            DataCard(ui, settings.mobileCapMb)
 
             Spacer(Modifier.height(Db.s4))
             Text(
@@ -133,8 +135,9 @@ fun HomeScreen(
                     Phase.ON -> "Stop boost"
                     Phase.STOPPING -> "Stopping…"
                 },
-                icon = if (ui.phase == Phase.OFF) R.drawable.ic_bolt else R.drawable.ic_power,
-                prominent = ui.phase == Phase.OFF,
+                icon = if (ui.phase == Phase.OFF || ui.phase == Phase.STARTING) R.drawable.ic_bolt else R.drawable.ic_power,
+                // Off → Wi-Fi blue "Start boost"; running → mobile orange "Stop boost".
+                color = if (ui.phase == Phase.OFF || ui.phase == Phase.STARTING) c.wifi else c.mobile,
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
                 onClick = onToggle,
@@ -168,9 +171,10 @@ private fun HeroCard(ui: BoostUi, on: Boolean) {
                 SpeedRing(wifiShare, active = flowing, modifier = Modifier.fillMaxSize())
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     if (on) {
-                        Text(formatMbps(total), color = c.ink, style = Db.display, maxLines = 1)
+                        val sp = formatSpeed(total, LocalSpeedUnit.current)
+                        Text(sp.value, color = c.ink, style = Db.display.fitted(sp.value, 4, 0.66f), maxLines = 1)
                         Spacer(Modifier.height(6.dp))
-                        Text("Mbps combined", color = c.muted, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                        Text("${sp.unit} combined", color = c.muted, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                     } else {
                         Text(
                             if (ui.phase == Phase.STARTING) "…" else "Off",
@@ -228,7 +232,8 @@ private fun LinkCard(
         }
         Spacer(Modifier.height(Db.s4))
         if (on && link.status != LinkStatus.OFF) {
-            ValueWithUnit(formatMbps(link.downMbps), "Mbps", Db.value)
+            val sp = formatSpeed(link.downMbps, LocalSpeedUnit.current)
+            ValueWithUnit(sp.value, sp.unit, Db.value.fitted(sp.value, 4, 0.7f))
         } else {
             Text("—", color = c.muted, style = Db.value)
         }
@@ -238,7 +243,7 @@ private fun LinkCard(
         Spacer(Modifier.height(10.dp))
         Text(
             when {
-                on && link.status != LinkStatus.OFF -> "↑ ${formatMbps(link.upMbps)} Mbps · ${link.connections} active"
+                on && link.status != LinkStatus.OFF -> "↑ ${formatSpeed(link.upMbps, LocalSpeedUnit.current)} · ${link.connections} active"
                 on -> "Not connected"
                 idleAvailable -> "Ready to combine"
                 else -> "Not connected"
@@ -341,28 +346,71 @@ private fun ChartCard(ui: BoostUi, on: Boolean) {
 }
 
 @Composable
-private fun StatsCard(ui: BoostUi, on: Boolean, now: Long, capMb: Int) {
-    val c = Db.colors
-    val (usedNum, usedUnit) = formatBytes(ui.mobileTodayBytes).split(" ").let { it[0] to it.getOrNull(1) }
+private fun StatsCard(ui: BoostUi, on: Boolean, now: Long) {
+    val unit = LocalSpeedUnit.current
+    val up = formatSpeed(ui.totalUp, unit)
+    val peak = formatSpeed(ui.peakMbps, unit)
     DbCard(Modifier.fillMaxWidth(), padding = 0.dp) {
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
-            StatCell(Modifier.weight(1f), "Upload", if (on) formatMbps(ui.totalUp) else null, "Mbps")
+            StatCell(Modifier.weight(1f), "Upload", if (on) up.value else null, up.unit, center = true)
             VLine()
-            StatCell(Modifier.weight(1f), "Peak", if (on) formatMbps(ui.peakMbps) else null, "Mbps")
-        }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(c.faint))
-        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+            StatCell(Modifier.weight(1f), "Peak", if (on) peak.value else null, peak.unit, center = true)
+            VLine()
             StatCell(
                 Modifier.weight(1f), "Session",
-                if (on && ui.startedAt > 0) formatDuration(now - ui.startedAt) else null, null,
+                if (on && ui.startedAt > 0) formatDuration(now - ui.startedAt) else null, null, center = true,
             )
+        }
+    }
+}
+
+/** Data used today on each link: Wi-Fi (blue) and mobile (orange), side by side. */
+@Composable
+private fun DataCard(ui: BoostUi, capMb: Int) {
+    val c = Db.colors
+    DbCard(Modifier.fillMaxWidth(), padding = 0.dp) {
+        Text(
+            "Data used today", color = c.ink, style = Db.cardTitle,
+            modifier = Modifier.padding(start = Db.s5, end = Db.s5, top = Db.s4),
+        )
+        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+            UsageCell(Modifier.weight(1f), "Wi-Fi", c.wifi, ui.wifiTodayBytes, footer = null)
             VLine()
-            StatCell(
-                Modifier.weight(1f), "Mobile today", usedNum, usedUnit,
+            UsageCell(
+                Modifier.weight(1f), "Mobile", c.mobile, ui.mobileTodayBytes,
                 footer = if (capMb > 0) {
-                    { ProgressLine(ui.mobileTodayBytes / (capMb * 1_000_000f), if (ui.mobileCapReached) c.mobile else c.wifi) }
+                    {
+                        ProgressLine(ui.mobileTodayBytes / (capMb * 1_000_000f), c.mobile)
+                        Spacer(Modifier.height(6.dp))
+                        Text("of ${formatBytes(capMb * 1_000_000L)} limit", color = c.muted, style = Db.caption)
+                    }
                 } else null,
             )
+        }
+    }
+}
+
+@Composable
+private fun UsageCell(
+    modifier: Modifier,
+    label: String,
+    color: Color,
+    bytes: Long,
+    footer: (@Composable () -> Unit)?,
+) {
+    val c = Db.colors
+    val (num, unit) = formatBytes(bytes).split(" ").let { it[0] to it.getOrNull(1) }
+    Column(modifier.padding(horizontal = Db.s5, vertical = Db.s3)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Dot(color, 8.dp)
+            Spacer(Modifier.width(6.dp))
+            Text(label, color = c.muted, style = Db.caption)
+        }
+        Spacer(Modifier.height(Db.s1))
+        ValueWithUnit(num, unit, Db.stat)
+        if (footer != null) {
+            Spacer(Modifier.height(Db.s2))
+            footer()
         }
     }
 }
@@ -378,13 +426,18 @@ private fun StatCell(
     label: String,
     value: String?,
     unit: String?,
+    center: Boolean = false,
     footer: (@Composable () -> Unit)? = null,
 ) {
     val c = Db.colors
-    Column(modifier.padding(horizontal = Db.s5, vertical = Db.s4)) {
+    Column(
+        modifier.padding(horizontal = Db.s3, vertical = Db.s4),
+        horizontalAlignment = if (center) Alignment.CenterHorizontally else Alignment.Start,
+    ) {
         Text(label, color = c.muted, style = Db.caption)
         Spacer(Modifier.height(Db.s1))
-        if (value != null) ValueWithUnit(value, unit, Db.stat) else Text("—", color = c.muted, style = Db.stat)
+        if (value != null) ValueWithUnit(value, unit, Db.stat.fitted(value, 4, 0.72f))
+        else Text("—", color = c.muted, style = Db.stat)
         if (footer != null) {
             Spacer(Modifier.height(Db.s2))
             footer()

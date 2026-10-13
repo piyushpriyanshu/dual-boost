@@ -29,7 +29,7 @@ import com.dualboost.app.core.Phase
 import com.dualboost.app.core.RelayServer
 import com.dualboost.app.core.TunnelNative
 import com.dualboost.app.ui.MainActivity
-import com.dualboost.app.ui.formatMbps
+import com.dualboost.app.ui.formatSpeed
 import java.io.File
 import java.net.InetAddress
 import java.util.concurrent.Executors
@@ -245,7 +245,12 @@ class BoostVpnService : VpnService() {
         BoostState.update { it.copy(phase = Phase.STOPPING) }
         teardown()
         BoostState.update {
-            BoostUi(phase = Phase.OFF, mobileTodayBytes = settings.mobileUsedToday(), mobileCapReached = capReached)
+            BoostUi(
+                phase = Phase.OFF,
+                mobileTodayBytes = settings.mobileUsedToday(),
+                wifiTodayBytes = settings.wifiUsedToday(),
+                mobileCapReached = capReached,
+            )
         }
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -260,6 +265,7 @@ class BoostVpnService : VpnService() {
         runCatching { tun?.close() }; tun = null
         relay?.stop(); relay = null
         balancer?.clear(); balancer = null
+        flushWifiUsage() // before the link counters go away
         links?.stop(); links = null
         settings.addMobileUsage(mobilePending.getAndSet(0))
     }
@@ -399,7 +405,19 @@ class BoostVpnService : VpnService() {
 
     // ------------------------------------------------------------------ statistics (every second)
 
+    /** Wi-Fi bytes already added to today's Wi-Fi total. */
+    private var wifiCounted = 0L
+
+    /** Adds Wi-Fi bytes moved since the last call to today's Wi-Fi usage. */
+    private fun flushWifiUsage() {
+        val w = links?.wifi ?: return
+        val total = w.rxBytes.get() + w.txBytes.get()
+        val delta = total - wifiCounted
+        if (delta > 0) { settings.addWifiUsage(delta); wifiCounted = total }
+    }
+
     private fun resetStats(lm: LinkMonitor) {
+        wifiCounted = lm.wifi.rxBytes.get() + lm.wifi.txBytes.get()
         lm.all.forEachIndexed { i, l ->
             lastRx[i] = l.rxBytes.get(); lastTx[i] = l.txBytes.get(); sessionStart[i] = lastRx[i] + lastTx[i]
         }
@@ -452,6 +470,7 @@ class BoostVpnService : VpnService() {
         }
 
         // Mobile data budget
+        flushWifiUsage()
         val pending = mobilePending.getAndSet(0)
         if (pending > 0) settings.addMobileUsage(pending)
         mobileToday = settings.mobileUsedToday()
@@ -468,6 +487,7 @@ class BoostVpnService : VpnService() {
                 wifiHistory = wifiHist.toList(), mobileHistory = mobileHist.toList(),
                 peakMbps = peak,
                 mobileTodayBytes = mobileToday,
+                wifiTodayBytes = settings.wifiUsedToday(),
                 mobileCapReached = capReached,
             )
         }
@@ -516,11 +536,11 @@ class BoostVpnService : VpnService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val title = when (ui.phase) {
-            Phase.ON -> "Boosting · ${formatMbps(ui.totalDown)} Mbps"
+            Phase.ON -> "Boosting · ${formatSpeed(ui.totalDown, settings.current.speedUnit)}"
             else -> "Starting boost…"
         }
         val text = if (ui.phase == Phase.ON)
-            "Wi-Fi ${formatMbps(ui.wifi.downMbps)}  ·  Mobile ${formatMbps(ui.mobile.downMbps)} Mbps"
+            "Wi-Fi ${formatSpeed(ui.wifi.downMbps, settings.current.speedUnit)}  ·  Mobile ${formatSpeed(ui.mobile.downMbps, settings.current.speedUnit)}"
         else "Connecting Wi-Fi and mobile data"
         return NotificationCompat.Builder(this, DualBoostApp.CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_bolt)

@@ -22,6 +22,7 @@ import com.dualboost.app.BuildConfig
 import com.dualboost.app.R
 import com.dualboost.app.core.BoostMode
 import com.dualboost.app.core.SettingsSnapshot
+import com.dualboost.app.core.SpeedUnit
 import com.dualboost.app.update.UpdatePhase
 import com.dualboost.app.update.UpdateUi
 
@@ -89,6 +90,25 @@ fun SettingsScreen(
             }
             Text(
                 "After the limit, mobile data is only used if Wi-Fi fails. Resets at midnight.",
+                color = c.muted, style = Db.small,
+                modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 18.dp),
+            )
+        }
+
+        // ---- Display
+        SectionHeader("Speed unit")
+        DbCard(Modifier.fillMaxWidth(), padding = 0.dp) {
+            Segmented(
+                SpeedUnit.entries.map { it.label },
+                selected = s.speedUnit.ordinal,
+                modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 18.dp),
+            ) { i -> onChange { it.copy(speedUnit = SpeedUnit.entries[i]) } }
+            Text(
+                when (s.speedUnit) {
+                    SpeedUnit.MBPS -> "Speeds show in megabits per second, e.g. 78.4 Mbps."
+                    SpeedUnit.KBPS -> "Speeds show in kilobits per second, e.g. 78,400 Kbps."
+                    SpeedUnit.AUTO -> "Mbps normally, switching to Kbps when speed is below 1 Mbps."
+                },
                 color = c.muted, style = Db.small,
                 modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 18.dp),
             )
