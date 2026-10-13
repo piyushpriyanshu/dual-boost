@@ -1,0 +1,84 @@
+package com.dualboost.app.core
+
+import java.net.InetAddress
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Decides which link each new connection uses.
+ *
+ * COMBINE: every new connection goes to the link where it is expected to get the most speed:
+ *   expected = learnedCapacity / (activeHeavyConnections + 1)
+ * This spreads busy apps across both links in proportion to their real speed
+ * (e.g. 50 Mbps Wi-Fi gets ~5 of every 8 parallel connections, 30 Mbps mobile gets ~3),
+ * while idle background connections are ignored.
+ *
+ * BACKUP: Wi-Fi only, mobile data takes over instantly if Wi-Fi fails.
+ *
+ * The returned list is an ordered preference: if the first link fails, the next is tried.
+ */
+class Balancer(
+    private val links: LinkMonitor,
+    private val settings: () -> SettingsSnapshot,
+    private val mobileCapReached: () -> Boolean,
+) {
+    private class Sticky(val type: LinkType, @Volatile var until: Long)
+    private val sticky = ConcurrentHashMap<InetAddress, Sticky>()
+
+    fun order(dst: InetAddress?, port: Int, udp: Boolean): List<Link> {
+        val now = System.currentTimeMillis()
+        val s = settings()
+        val up = links.all.filter { it.isUp }
+        if (up.size <= 1) return up
+
+        // Prefer validated links (real internet) over ones stuck behind a login page.
+        val validated = up.filter { it.validated }
+        val pool = if (validated.isNotEmpty()) validated else up
+        val wifi = links.wifi
+        val mobile = links.mobile
+
+        // Mobile data budget reached → mobile is last resort only.
+        val capHit = mobileCapReached()
+
+        val primary: Link = when {
+            pool.size == 1 -> pool[0]
+            s.mode == BoostMode.BACKUP || capHit ->
+                if (!wifi.inPenalty(now)) wifi else mobile
+            udp && port == 53 -> if (!wifi.inPenalty(now)) wifi else mobile // DNS: lowest latency
+            else -> {
+                val pinned = if (s.stickySites && dst != null) sticky[dst] else null
+                if (pinned != null && pinned.until > now) {
+                    pinned.until = now + STICKY_MS
+                    if (pinned.type == LinkType.WIFI) wifi else mobile
+                } else {
+                    pickBest(now, wifi, mobile).also {
+                        if (s.stickySites && dst != null) sticky[dst] = Sticky(it.type, now + STICKY_MS)
+                    }
+                }
+            }
+        }
+        if (sticky.size > 4096) sticky.entries.removeIf { it.value.until < now }
+
+        val rest = up.filter { it !== primary }
+            .sortedBy { if (it.validated) 0 else 1 }
+        return listOf(primary) + rest
+    }
+
+    private fun pickBest(now: Long, wifi: Link, mobile: Link): Link {
+        if (wifi.inPenalty(now) && !mobile.inPenalty(now)) return mobile
+        if (mobile.inPenalty(now) && !wifi.inPenalty(now)) return wifi
+        val ew = expected(wifi, now)
+        // Small bias toward Wi-Fi: it is free and usually lower latency.
+        val em = expected(mobile, now) * MOBILE_BIAS
+        return if (ew >= em) wifi else mobile
+    }
+
+    private fun expected(link: Link, now: Long): Double =
+        link.capacity / (link.heavyFlows(now) + 1)
+
+    fun clear() = sticky.clear()
+
+    companion object {
+        private const val STICKY_MS = 10 * 60_000L
+        private const val MOBILE_BIAS = 0.9
+    }
+}
