@@ -24,6 +24,10 @@ android {
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
         versionName = System.getenv("VERSION_NAME") ?: "1.0.0"
 
+        // GitHub repository whose Releases provide in-app updates.
+        val repo = System.getenv("GITHUB_REPOSITORY") ?: "piyushpriyanshu/dual-boost"
+        buildConfigField("String", "UPDATE_REPO", "\"$repo\"")
+
         ndk { abiFilters += listOf("arm64-v8a") }
 
         externalNativeBuild {
@@ -90,6 +94,7 @@ dependencies {
     implementation(composeBom)
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.0")
     implementation("androidx.compose.ui:ui")

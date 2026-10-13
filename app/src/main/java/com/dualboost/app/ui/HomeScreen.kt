@@ -55,6 +55,8 @@ import com.dualboost.app.core.BoostUi
 import com.dualboost.app.core.LinkStatus
 import com.dualboost.app.core.LinkUi
 import com.dualboost.app.core.Phase
+import com.dualboost.app.update.UpdatePhase
+import com.dualboost.app.update.UpdateUi
 import kotlinx.coroutines.delay
 
 /** What the phone reports while the boost is off, so the cards are never empty. */
@@ -69,6 +71,10 @@ fun HomeScreen(
     onOpenSettings: () -> Unit,
     onOpenDeveloperOptions: () -> Unit,
     onDismissError: () -> Unit,
+    update: UpdateUi,
+    canInstall: Boolean,
+    onUpdate: () -> Unit,
+    onAllowInstall: () -> Unit,
 ) {
     val c = Db.colors
     val on = ui.phase == Phase.ON
@@ -99,6 +105,17 @@ fun HomeScreen(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Db.s3)) {
                 LinkCard(Modifier.weight(1f), "Wi-Fi", R.drawable.ic_wifi, wifi, on, isMobile = false)
                 LinkCard(Modifier.weight(1f), "Mobile", R.drawable.ic_mobile, mobile, on, isMobile = true)
+            }
+
+            // ---- Update available / in progress
+            val showUpdate = update.phase in setOf(
+                UpdatePhase.AVAILABLE, UpdatePhase.DOWNLOADING, UpdatePhase.INSTALLING, UpdatePhase.WAITING_CONFIRM,
+            ) || (update.phase == UpdatePhase.ERROR && update.info != null)
+            AnimatedVisibility(showUpdate, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
+                Column {
+                    Spacer(Modifier.height(Db.s3))
+                    UpdateBanner(update, canInstall, onUpdate, onAllowInstall)
+                }
             }
 
             // ---- Attention banners

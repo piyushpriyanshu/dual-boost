@@ -7,6 +7,20 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.time.LocalDate
 
+/** When DualBoost looks for a new version on GitHub. */
+enum class UpdateCheck(val label: String, val hours: Long) {
+    ON_OPEN("When I open the app", 0),
+    EVERY_1H("Every 1 hour", 1),
+    EVERY_3H("Every 3 hours", 3),
+    EVERY_6H("Every 6 hours", 6),
+    MANUAL("Manual only", 0);
+
+    /** Checks in the background on a timer. */
+    val background: Boolean get() = hours > 0
+    /** Checks each time the app is opened. */
+    val onOpen: Boolean get() = this != MANUAL
+}
+
 /** How traffic is shared between the two links. */
 enum class BoostMode { COMBINE, BACKUP }
 
@@ -25,6 +39,10 @@ data class SettingsSnapshot(
     val autoStart: Boolean = false,
     /** Apps that bypass DualBoost entirely. */
     val excludedApps: Set<String> = emptySet(),
+    /** When to look for updates. */
+    val updateCheck: UpdateCheck = UpdateCheck.EVERY_6H,
+    /** Download and install updates without asking first. */
+    val autoUpdate: Boolean = true,
 )
 
 /** Persistent settings + mobile usage counter. Single instance per process. */
@@ -46,6 +64,9 @@ class BoostSettings private constructor(context: Context) {
         ipv6 = prefs.getBoolean(K_V6, true),
         autoStart = prefs.getBoolean(K_AUTO, false),
         excludedApps = prefs.getStringSet(K_EXCL, emptySet())?.toSet() ?: emptySet(),
+        updateCheck = runCatching { UpdateCheck.valueOf(prefs.getString(K_UPD, null) ?: "EVERY_6H") }
+            .getOrDefault(UpdateCheck.EVERY_6H),
+        autoUpdate = prefs.getBoolean(K_AUTOUPD, true),
     )
 
     fun update(block: (SettingsSnapshot) -> SettingsSnapshot) {
@@ -58,6 +79,8 @@ class BoostSettings private constructor(context: Context) {
             .putBoolean(K_V6, next.ipv6)
             .putBoolean(K_AUTO, next.autoStart)
             .putStringSet(K_EXCL, HashSet(next.excludedApps))
+            .putString(K_UPD, next.updateCheck.name)
+            .putBoolean(K_AUTOUPD, next.autoUpdate)
             .apply()
         _state.value = next
     }
@@ -100,6 +123,8 @@ class BoostSettings private constructor(context: Context) {
         private const val K_USED = "mobile_used"
         private const val K_DAY = "mobile_day"
         private const val K_WANT = "want_running"
+        private const val K_UPD = "update_check"
+        private const val K_AUTOUPD = "auto_update"
 
         @Volatile private var instance: BoostSettings? = null
 

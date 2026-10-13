@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,6 +51,10 @@ import com.dualboost.app.core.BoostSettings
 import com.dualboost.app.core.BoostState
 import com.dualboost.app.core.Phase
 import com.dualboost.app.service.BoostVpnService
+import com.dualboost.app.update.UpdatePhase
+import com.dualboost.app.update.UpdateWorker
+import com.dualboost.app.update.Updater
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -58,6 +63,9 @@ private enum class Screen { HOME, SETTINGS, APPS }
 
 class MainActivity : ComponentActivity() {
 
+    /** Set when the user taps an "update available" notification. */
+    private val updateTapped = MutableStateFlow(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -65,25 +73,87 @@ class MainActivity : ComponentActivity() {
         if (BoostState.ui.value.phase == Phase.OFF) {
             BoostState.update { it.copy(mobileTodayBytes = settings.mobileUsedToday()) }
         }
+        handleIntent(intent)
         setContent {
-            DualBoostTheme { App(settings) }
+            DualBoostTheme { App(settings, updateTapped) }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_OPEN_UPDATE, false) == true) {
+            intent.removeExtra(EXTRA_OPEN_UPDATE)
+            updateTapped.value = true
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        Updater.appInForeground = true
+    }
+
+    override fun onStop() {
+        Updater.appInForeground = false
+        super.onStop()
+    }
+
+    companion object {
+        const val EXTRA_OPEN_UPDATE = "open_update"
     }
 }
 
 @Composable
-private fun App(settings: BoostSettings) {
+private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val ui by BoostState.ui.collectAsStateWithLifecycle()
     val s by settings.state.collectAsStateWithLifecycle()
+    val update by Updater.ui.collectAsStateWithLifecycle()
+    val tapped by updateTapped.collectAsStateWithLifecycle()
     var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
     val idle = rememberIdleLinks()
 
     var batteryOk by remember { mutableStateOf(isBatteryUnrestricted(context)) }
+    var canInstall by remember { mutableStateOf(Updater.canInstall(context)) }
+    val selfInstalled = remember { Updater.isSelfInstalled(context) }
+
+    fun installLatest() {
+        scope.launch {
+            val info = Updater.ui.value.info ?: Updater.check(context) ?: return@launch
+            Updater.downloadAndInstall(context, info)
+        }
+    }
+
+    // Every time the app comes to the front: refresh permissions and (if chosen) look for updates.
     LifecycleResumeEffect(Unit) {
         batteryOk = isBatteryUnrestricted(context)
+        canInstall = Updater.canInstall(context)
+        val cur = settings.current
+        val stale = System.currentTimeMillis() - Updater.ui.value.lastChecked > 2 * 60_000
+        val idleUpdater = Updater.ui.value.phase !in setOf(UpdatePhase.DOWNLOADING, UpdatePhase.INSTALLING, UpdatePhase.WAITING_CONFIRM)
+        if (cur.updateCheck.onOpen && stale && idleUpdater) {
+            scope.launch {
+                val info = Updater.check(context)
+                if (info != null && cur.autoUpdate && Updater.canInstall(context)) Updater.downloadAndInstall(context, info)
+            }
+        }
         onPauseOrDispose { }
+    }
+
+    // Tapped an "update available" notification: that is the go-ahead.
+    LaunchedEffect(tapped) {
+        if (tapped) {
+            updateTapped.value = false
+            if (Updater.canInstall(context)) installLatest()
+        }
+    }
+
+    fun allowInstalls() {
+        open(context, Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
     }
 
     val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
@@ -132,12 +202,24 @@ private fun App(settings: BoostSettings) {
                     onOpenSettings = { screen = Screen.SETTINGS },
                     onOpenDeveloperOptions = { openDeveloperOptions(context) },
                     onDismissError = { BoostState.update { it.copy(error = null) } },
+                    update = update,
+                    canInstall = canInstall,
+                    onUpdate = { installLatest() },
+                    onAllowInstall = { allowInstalls() },
                 )
                 Screen.SETTINGS -> SettingsScreen(
                     s = s,
                     running = ui.phase == Phase.ON,
                     batteryUnrestricted = batteryOk,
-                    onChange = { settings.update(it) },
+                    onChange = { block ->
+                        val before = settings.current.updateCheck
+                        settings.update(block)
+                        val after = settings.current.updateCheck
+                        if (after != before) {
+                            UpdateWorker.schedule(context, after, changed = true)
+                            if (after.background) scope.launch { Updater.check(context) }
+                        }
+                    },
                     onBack = { screen = Screen.HOME },
                     onOpenApps = { screen = Screen.APPS },
                     onRestart = {
@@ -151,6 +233,12 @@ private fun App(settings: BoostSettings) {
                     onAlwaysOn = { open(context, Intent(Settings.ACTION_VPN_SETTINGS)) },
                     onBattery = { openBattery(context, batteryOk) },
                     onDeveloper = { openDeveloperOptions(context) },
+                    update = update,
+                    canInstall = canInstall,
+                    selfInstalled = selfInstalled,
+                    onCheckNow = { scope.launch { Updater.check(context) } },
+                    onUpdate = { installLatest() },
+                    onAllowInstall = { allowInstalls() },
                 )
                 Screen.APPS -> AppsScreen(
                     excluded = s.excludedApps,

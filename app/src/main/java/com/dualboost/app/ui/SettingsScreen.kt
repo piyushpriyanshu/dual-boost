@@ -35,6 +35,7 @@ import com.dualboost.app.BuildConfig
 import com.dualboost.app.R
 import com.dualboost.app.core.BoostMode
 import com.dualboost.app.core.SettingsSnapshot
+import com.dualboost.app.update.UpdateUi
 
 val CAP_OPTIONS = listOf(0, 500, 1000, 2000, 5000)
 private fun capLabel(mb: Int) = when (mb) { 0 -> "Off"; 500 -> "500 MB"; else -> "${mb / 1000} GB" }
@@ -51,6 +52,12 @@ fun SettingsScreen(
     onAlwaysOn: () -> Unit,
     onBattery: () -> Unit,
     onDeveloper: () -> Unit,
+    update: UpdateUi,
+    canInstall: Boolean,
+    selfInstalled: Boolean,
+    onCheckNow: () -> Unit,
+    onUpdate: () -> Unit,
+    onAllowInstall: () -> Unit,
 ) {
     val c = Db.colors
     Column(
@@ -182,6 +189,20 @@ fun SettingsScreen(
                 onClick = onDeveloper,
             )
         }
+
+        // ---- Updates
+        UpdatesSection(
+            u = update,
+            check = s.updateCheck,
+            autoUpdate = s.autoUpdate,
+            canInstall = canInstall,
+            selfInstalled = selfInstalled,
+            onCheckChange = { v -> onChange { it.copy(updateCheck = v) } },
+            onAutoChange = { v -> onChange { it.copy(autoUpdate = v) } },
+            onCheckNow = onCheckNow,
+            onUpdate = onUpdate,
+            onAllow = onAllowInstall,
+        )
 
         // ---- About
         SectionTitle("How it works")

@@ -56,6 +56,8 @@ jobs:
           "$BT/apksigner" verify --print-certs "$APK" | head -5
           "$BT/zipalign" -c -P 16 -v 4 "$APK" | tail -1
           cp "$APK" "DualBoost-v${VERSION_NAME}.apk"
+          sha256sum "DualBoost-v${VERSION_NAME}.apk" > "DualBoost-v${VERSION_NAME}.apk.sha256"
+          cat "DualBoost-v${VERSION_NAME}.apk.sha256"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -67,10 +69,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${VERSION_NAME}" "DualBoost-v${VERSION_NAME}.apk" \
+          WHATS_NEW="$(git log -1 --pretty=%s)"
+          {
+            echo "What's new: ${WHATS_NEW}"
+            echo
+            echo "DualBoost updates itself from this page. For a first install, download **DualBoost-v${VERSION_NAME}.apk** below on your phone and open it."
+            echo
+            echo "Built from commit ${GITHUB_SHA::7}."
+          } > notes.md
+          gh release create "v${VERSION_NAME}" \
+            "DualBoost-v${VERSION_NAME}.apk" \
+            "DualBoost-v${VERSION_NAME}.apk.sha256" \
             --title "DualBoost ${VERSION_NAME}" \
             --latest \
-            --notes "Install: download **DualBoost-v${VERSION_NAME}.apk** below on your phone and open it. Built from commit ${GITHUB_SHA::7}."
+            --notes-file notes.md
 
       - name: Report build failure as an issue
         if: failure()
