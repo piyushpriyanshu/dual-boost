@@ -1,45 +1,40 @@
 package com.dualboost.app.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.dualboost.app.BuildConfig
+import com.dualboost.app.R
 import com.dualboost.app.core.UpdateCheck
 import com.dualboost.app.update.UpdatePhase
 import com.dualboost.app.update.UpdateUi
 
-private fun UpdateUi.statusText(canInstall: Boolean): String = when (phase) {
+fun UpdateUi.statusText(canInstall: Boolean): String = when (phase) {
     UpdatePhase.IDLE -> "Not checked yet"
-    UpdatePhase.CHECKING -> "Checking GitHub…"
+    UpdatePhase.CHECKING -> "Checking for updates…"
     UpdatePhase.UP_TO_DATE -> "You're on the latest version"
-    UpdatePhase.AVAILABLE -> if (canInstall) "Version ${info?.versionName} is available" else "Version ${info?.versionName} is available. Allow installs to update."
+    UpdatePhase.AVAILABLE -> if (canInstall) "Version ${info?.versionName} is available"
+    else "Version ${info?.versionName} is available. Allow installs to update."
     UpdatePhase.DOWNLOADING -> "Downloading ${info?.versionName}… ${(progress * 100).toInt()}%"
-    UpdatePhase.INSTALLING -> "Installing ${info?.versionName}… DualBoost will restart"
+    UpdatePhase.INSTALLING -> "Installing ${info?.versionName}. DualBoost will restart."
     UpdatePhase.WAITING_CONFIRM -> "Tap Update in Android's dialog to finish"
     UpdatePhase.ERROR -> message ?: "Something went wrong"
 }
 
-private fun ago(t: Long): String {
+fun ago(t: Long): String {
     if (t <= 0) return "never"
     val m = (System.currentTimeMillis() - t) / 60_000
     return when {
@@ -50,39 +45,33 @@ private fun ago(t: Long): String {
     }
 }
 
-/** Compact banner on the home screen while an update is available or in progress. */
+private val UpdatePhase.busy get() = this == UpdatePhase.CHECKING || this == UpdatePhase.DOWNLOADING || this == UpdatePhase.INSTALLING
+
+/** Home-screen notice while an update is available or in progress. */
 @Composable
-fun UpdateBanner(u: UpdateUi, canInstall: Boolean, onUpdate: () -> Unit, onAllow: () -> Unit) {
+fun UpdateNotice(u: UpdateUi, canInstall: Boolean, onUpdate: () -> Unit, onAllow: () -> Unit) {
     val c = Db.colors
-    val busy = u.phase == UpdatePhase.DOWNLOADING || u.phase == UpdatePhase.INSTALLING
-    DbCard(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Dot(c.accent)
-            Spacer(Modifier.width(Db.s3))
-            Column(Modifier.weight(1f)) {
-                Text("Update ${u.info?.versionName ?: ""}".trim(), color = c.ink, style = Db.body, fontWeight = FontWeight.SemiBold)
-                val notes = u.info?.notes.orEmpty()
-                Text(
-                    if (notes.isNotBlank() && u.phase == UpdatePhase.AVAILABLE) notes
-                    else u.statusText(canInstall),
-                    color = c.muted, style = Db.bodySmall, maxLines = 2,
-                )
+    val notes = u.info?.notes.orEmpty()
+    val showAction = !u.phase.busy && u.phase != UpdatePhase.WAITING_CONFIRM
+    NoticeCard(
+        title = "Update ${u.info?.versionName ?: ""}".trim(),
+        text = if (notes.isNotBlank() && u.phase == UpdatePhase.AVAILABLE) notes else u.statusText(canInstall),
+        color = c.primary,
+        icon = R.drawable.ic_download,
+        action = if (!showAction) null else if (canInstall) "Update" else "Allow",
+        onAction = if (canInstall) onUpdate else onAllow,
+        trailing = if (u.phase == UpdatePhase.DOWNLOADING || u.phase == UpdatePhase.INSTALLING) {
+            {
+                Spacer(Modifier.height(14.dp))
+                ProgressLine(if (u.phase == UpdatePhase.INSTALLING) 1f else u.progress, c.primary)
             }
-            if (!busy && u.phase != UpdatePhase.WAITING_CONFIRM) {
-                Spacer(Modifier.width(Db.s3))
-                SmallPill(if (canInstall) "Update" else "Allow", onClick = if (canInstall) onUpdate else onAllow)
-            }
-        }
-        if (busy) {
-            Spacer(Modifier.height(Db.s3))
-            ProgressLine(if (u.phase == UpdatePhase.INSTALLING) 1f else u.progress, c.accent)
-        }
-    }
+        } else null,
+    )
 }
 
-/** The "Updates" section of Settings. */
+/** Full "Check for updates" screen: how often + status. */
 @Composable
-fun UpdatesSection(
+fun UpdatesScreen(
     u: UpdateUi,
     check: UpdateCheck,
     autoUpdate: Boolean,
@@ -93,108 +82,83 @@ fun UpdatesSection(
     onCheckNow: () -> Unit,
     onUpdate: () -> Unit,
     onAllow: () -> Unit,
+    onBack: () -> Unit,
 ) {
     val c = Db.colors
-    SectionTitle("Updates")
-    // Status
-    DbCard(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Label("Installed ${BuildConfig.VERSION_NAME}")
-                Spacer(Modifier.height(Db.s1))
-                Text(u.statusText(canInstall), color = c.ink, style = Db.body, fontWeight = FontWeight.Medium)
-                Spacer(Modifier.height(2.dp))
-                Text("Last checked ${ago(u.lastChecked)}", color = c.muted, style = Db.bodySmall)
-            }
-            Spacer(Modifier.width(Db.s3))
-            val busy = u.phase in setOf(UpdatePhase.CHECKING, UpdatePhase.DOWNLOADING, UpdatePhase.INSTALLING)
-            when {
-                busy -> {}
-                u.phase == UpdatePhase.AVAILABLE && !canInstall -> SmallPill("Allow", onClick = onAllow)
-                u.phase == UpdatePhase.AVAILABLE || (u.phase == UpdatePhase.ERROR && u.info != null) -> SmallPill("Update", onClick = onUpdate)
-                else -> SmallPill("Check now", filled = false, onClick = onCheckNow)
-            }
-        }
-        if (u.phase == UpdatePhase.DOWNLOADING || u.phase == UpdatePhase.INSTALLING) {
-            Spacer(Modifier.height(Db.s3))
-            ProgressLine(if (u.phase == UpdatePhase.INSTALLING) 1f else u.progress, c.accent)
-        }
-    }
+    Column(
+        Modifier.fillMaxSize().background(c.bg)
+            .verticalScroll(rememberScrollState())
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(horizontal = Db.gutter),
+    ) {
+        TopBar("Check for updates", onBack)
 
-    Spacer(Modifier.height(Db.s3))
-    // When to check
-    SettingsGroup {
-        Text(
-            "CHECK FOR UPDATES", color = c.muted, style = Db.label,
-            modifier = Modifier.padding(start = Db.s5, top = Db.s4, bottom = Db.s1),
-        )
-        UpdateCheck.entries.forEachIndexed { i, opt ->
-            if (i > 0) Hairline()
-            RadioRow(
-                title = opt.label,
-                subtitle = when (opt) {
-                    UpdateCheck.ON_OPEN -> "Only checks when you open DualBoost"
-                    UpdateCheck.MANUAL -> "Only when you tap Check now"
-                    else -> "In the background, and when you open the app"
-                },
-                selected = opt == check,
-            ) { onCheckChange(opt) }
+        SectionHeader("Status")
+        SettingsGroup {
+            SettingRow(
+                title = u.statusText(canInstall),
+                subtitle = "Installed ${BuildConfig.VERSION_NAME} · checked ${ago(u.lastChecked)}",
+                icon = R.drawable.ic_update,
+                iconColor = c.mobile,
+            ) {
+                when {
+                    u.phase.busy || u.phase == UpdatePhase.WAITING_CONFIRM -> {}
+                    (u.phase == UpdatePhase.AVAILABLE || (u.phase == UpdatePhase.ERROR && u.info != null)) && !canInstall ->
+                        SmallPill("Allow", onClick = onAllow)
+                    u.phase == UpdatePhase.AVAILABLE || (u.phase == UpdatePhase.ERROR && u.info != null) ->
+                        SmallPill("Update", onClick = onUpdate)
+                    else -> SmallPill("Check now", filled = false, onClick = onCheckNow)
+                }
+            }
+            if (u.phase == UpdatePhase.DOWNLOADING || u.phase == UpdatePhase.INSTALLING) {
+                Column(Modifier.padding(start = 18.dp, end = 18.dp, bottom = 16.dp)) {
+                    ProgressLine(if (u.phase == UpdatePhase.INSTALLING) 1f else u.progress, c.primary)
+                }
+            }
         }
-    }
 
-    Spacer(Modifier.height(Db.s3))
-    SettingsGroup {
-        SwitchRow(
-            "Install updates automatically",
-            if (selfInstalled) "Downloads and installs new versions without asking."
-            else "Downloads and installs new versions. Android asks to confirm the first time; after that it's automatic.",
-            autoUpdate,
-        ) { onAutoChange(it) }
-        if (!canInstall) {
-            Hairline()
-            ChevronRow(
-                "Allow installing updates",
-                "Needed once so DualBoost can update itself.",
-                value = "Off",
-                onClick = onAllow,
+        SectionHeader("How often")
+        SettingsGroup {
+            UpdateCheck.entries.forEachIndexed { i, opt ->
+                if (i > 0) RowDivider(inset = false)
+                RadioRow(
+                    title = opt.label,
+                    subtitle = when (opt) {
+                        UpdateCheck.ON_OPEN -> "Only checks when you open DualBoost"
+                        UpdateCheck.MANUAL -> "Only when you tap Check now"
+                        else -> "In the background, and when you open the app"
+                    },
+                    selected = opt == check,
+                ) { onCheckChange(opt) }
+            }
+        }
+
+        SectionHeader("Installing")
+        SettingsGroup {
+            SwitchRow(
+                "Install automatically",
+                if (selfInstalled) "New versions install without asking"
+                else "Android asks once to confirm. After that, updates are automatic.",
+                R.drawable.ic_download, c.purple, autoUpdate, onAutoChange,
             )
+            if (!canInstall) {
+                RowDivider()
+                ChevronRow(
+                    "Allow installing updates",
+                    "Needed once so DualBoost can update itself",
+                    R.drawable.ic_shield, c.good, value = "Off", onClick = onAllow,
+                )
+            }
         }
+        Spacer(Modifier.height(Db.s8))
+        Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars))
     }
 }
 
-@Composable
-private fun RadioRow(title: String, subtitle: String, selected: Boolean, onClick: () -> Unit) {
-    val c = Db.colors
-    Row(
-        Modifier.fillMaxWidth().clickable(role = Role.RadioButton, onClick = onClick)
-            .heightIn(min = 60.dp).padding(horizontal = Db.s5, vertical = Db.s3),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, color = c.ink, style = Db.body, fontWeight = FontWeight.Medium)
-            Text(subtitle, color = c.muted, style = Db.bodySmall)
-        }
-        Spacer(Modifier.width(Db.s4))
-        Box(
-            Modifier.size(22.dp).clip(CircleShape)
-                .border(2.dp, if (selected) c.accent else c.faint, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (selected) Box(Modifier.size(11.dp).clip(CircleShape).background(c.accent))
-        }
-    }
-}
-
-@Composable
-fun SmallPill(text: String, filled: Boolean = true, onClick: () -> Unit) {
-    val c = Db.colors
-    Box(
-        Modifier.clip(CircleShape)
-            .background(if (filled) c.accent else c.surfaceHigh)
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 9.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(text, color = if (filled) c.onAccent else c.ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-    }
+fun UpdateCheck.shortLabel(): String = when (this) {
+    UpdateCheck.ON_OPEN -> "When opened"
+    UpdateCheck.EVERY_1H -> "Every hour"
+    UpdateCheck.EVERY_3H -> "Every 3 hours"
+    UpdateCheck.EVERY_6H -> "Every 6 hours"
+    UpdateCheck.MANUAL -> "Manual"
 }

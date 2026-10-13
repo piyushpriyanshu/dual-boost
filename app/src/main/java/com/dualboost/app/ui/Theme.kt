@@ -10,12 +10,14 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Design tokens. Wi-Fi is always drawn in [ink], mobile data always in [accent]. */
+/**
+ * Design tokens. Wi-Fi is always blue, mobile data always orange, so every chart,
+ * ring, icon and legend reads the same way. [primary] (Wi-Fi blue) drives controls.
+ */
 @Immutable
 data class DbColors(
     val bg: Color,
@@ -24,40 +26,47 @@ data class DbColors(
     val ink: Color,
     val muted: Color,
     val faint: Color,
-    val hairline: Color,
-    val accent: Color,
-    val onAccent: Color,
+    val wifi: Color,
+    val mobile: Color,
     val good: Color,
+    val warn: Color,
+    val purple: Color,
+    val primary: Color,
+    val onPrimary: Color,
     val dark: Boolean,
 )
 
-val Accent = Color(0xFFE8332A)
-
 private val Dark = DbColors(
-    bg = Color(0xFF0B0B0C),
-    surface = Color(0xFF151517),
-    surfaceHigh = Color(0xFF1E1E21),
-    ink = Color(0xFFF4F4F1),
-    muted = Color(0xFF8C8C91),
-    faint = Color(0xFF26262A),
-    hairline = Color(0xFF242427),
-    accent = Accent,
-    onAccent = Color.White,
-    good = Color(0xFF4CD27A),
+    bg = Color(0xFF0E0F12),
+    surface = Color(0xFF17191D),
+    surfaceHigh = Color(0xFF202328),
+    ink = Color(0xFFF2F3F5),
+    muted = Color(0xFF8B9099),
+    faint = Color(0xFF2A2D33),
+    wifi = Color(0xFF4C8DFF),
+    mobile = Color(0xFFFF7A45),
+    good = Color(0xFF3DD68C),
+    warn = Color(0xFFFFB547),
+    purple = Color(0xFFB07CFF),
+    primary = Color(0xFF4C8DFF),
+    onPrimary = Color.White,
     dark = true,
 )
 
 private val Light = DbColors(
-    bg = Color(0xFFF4F3EF),
+    bg = Color(0xFFF3F4F6),
     surface = Color(0xFFFFFFFF),
-    surfaceHigh = Color(0xFFECEBE6),
-    ink = Color(0xFF0B0B0C),
-    muted = Color(0xFF6C6C71),
-    faint = Color(0xFFE2E1DB),
-    hairline = Color(0xFFE6E5E0),
-    accent = Accent,
-    onAccent = Color.White,
-    good = Color(0xFF1F9D52),
+    surfaceHigh = Color(0xFFEEF0F3),
+    ink = Color(0xFF111317),
+    muted = Color(0xFF6B7079),
+    faint = Color(0xFFE3E6EA),
+    wifi = Color(0xFF2F6FED),
+    mobile = Color(0xFFF2612B),
+    good = Color(0xFF1E9E5A),
+    warn = Color(0xFFD98A00),
+    purple = Color(0xFF8B5CF6),
+    primary = Color(0xFF2F6FED),
+    onPrimary = Color.White,
     dark = false,
 )
 
@@ -66,7 +75,7 @@ val LocalDb = staticCompositionLocalOf { Dark }
 object Db {
     val colors: DbColors @Composable get() = LocalDb.current
 
-    // 8-point spacing grid
+    // 4-point spacing scale
     val s1 = 4.dp
     val s2 = 8.dp
     val s3 = 12.dp
@@ -75,17 +84,23 @@ object Db {
     val s6 = 24.dp
     val s8 = 32.dp
     val gutter = 20.dp
-    val radius = 28.dp
-    val radiusSmall = 18.dp
+    val radius = 24.dp
 
-    val mono = FontFamily.Monospace
+    /** Tabular figures keep numbers from shifting width while they update. */
+    private const val TNUM = "tnum"
 
-    /** Small spaced-out uppercase label, the signature of the design. */
-    val label = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp, letterSpacing = 1.6.sp, fontWeight = FontWeight.Medium)
-    val title = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.2).sp)
+    val display = TextStyle(fontSize = 60.sp, fontWeight = FontWeight.Bold, letterSpacing = (-2).sp, lineHeight = 64.sp, fontFeatureSettings = TNUM)
+    val displayOff = TextStyle(fontSize = 44.sp, fontWeight = FontWeight.Bold, letterSpacing = (-1).sp, lineHeight = 48.sp)
+    val h1 = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.3).sp)
+    val value = TextStyle(fontSize = 30.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.8).sp, fontFeatureSettings = TNUM)
+    val stat = TextStyle(fontSize = 20.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.3).sp, fontFeatureSettings = TNUM)
+    val cardTitle = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+    val rowTitle = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold, lineHeight = 20.sp)
     val body = TextStyle(fontSize = 15.sp, lineHeight = 21.sp)
-    val bodySmall = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
-    val number = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 26.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.5).sp)
+    val small = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
+    val caption = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = TNUM)
+    val section = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+    val unit = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium)
 }
 
 @Composable
@@ -93,13 +108,13 @@ fun DualBoostTheme(content: @Composable () -> Unit) {
     val dark = isSystemInDarkTheme()
     val c = if (dark) Dark else Light
     val scheme = if (dark) darkColorScheme(
-        primary = c.accent, onPrimary = c.onAccent, background = c.bg, onBackground = c.ink,
+        primary = c.primary, onPrimary = c.onPrimary, background = c.bg, onBackground = c.ink,
         surface = c.surface, onSurface = c.ink, surfaceVariant = c.surfaceHigh, onSurfaceVariant = c.muted,
-        outline = c.faint, outlineVariant = c.hairline,
+        outline = c.faint, outlineVariant = c.faint,
     ) else lightColorScheme(
-        primary = c.accent, onPrimary = c.onAccent, background = c.bg, onBackground = c.ink,
+        primary = c.primary, onPrimary = c.onPrimary, background = c.bg, onBackground = c.ink,
         surface = c.surface, onSurface = c.ink, surfaceVariant = c.surfaceHigh, onSurfaceVariant = c.muted,
-        outline = c.faint, outlineVariant = c.hairline,
+        outline = c.faint, outlineVariant = c.faint,
     )
     CompositionLocalProvider(LocalDb provides c) {
         MaterialTheme(colorScheme = scheme, content = content)

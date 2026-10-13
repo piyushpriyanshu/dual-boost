@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,8 +26,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -44,6 +42,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import com.dualboost.app.R
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -88,31 +88,36 @@ fun AppsScreen(excluded: Set<String>, onToggle: (String, Boolean) -> Unit, onBac
             Spacer(Modifier.height(Db.s4))
             Text(
                 "Excluded apps skip DualBoost and use your phone's normal connection. Useful for banking apps or anything that dislikes VPNs.",
-                color = c.muted, style = Db.bodySmall,
+                color = c.muted, style = Db.small,
             )
             Spacer(Modifier.height(Db.s4))
             // Search
             val shape = RoundedCornerShape(50)
-            Box(
-                Modifier.fillMaxWidth().clip(shape).background(c.surface).border(1.dp, c.hairline, shape)
-                    .padding(horizontal = Db.s5, vertical = 14.dp)
+            Row(
+                Modifier.fillMaxWidth().height(52.dp).clip(shape).background(c.surface)
+                    .padding(horizontal = Db.s4),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (query.isEmpty()) Text("Search apps", color = c.muted, fontSize = 15.sp)
-                BasicTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    singleLine = true,
-                    textStyle = TextStyle(color = c.ink, fontSize = 15.sp),
-                    cursorBrush = SolidColor(c.accent),
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                Icon(painterResource(R.drawable.ic_search), null, tint = c.muted, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(Db.s3))
+                Box(Modifier.weight(1f)) {
+                    if (query.isEmpty()) Text("Search apps", color = c.muted, fontSize = 15.sp)
+                    BasicTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        singleLine = true,
+                        textStyle = TextStyle(color = c.ink, fontSize = 15.sp),
+                        cursorBrush = SolidColor(c.primary),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
             Spacer(Modifier.height(Db.s3))
         }
 
         val list = apps
         if (list == null) {
-            CenterBox(Modifier.fillMaxSize()) { Text("Loading apps…", color = c.muted, style = Db.bodySmall) }
+            CenterBox(Modifier.fillMaxSize()) { Text("Loading apps…", color = c.muted, style = Db.small) }
             return@Column
         }
         val shown = list
@@ -142,7 +147,7 @@ private fun AppRow(app: AppEntry, checked: Boolean, onChange: (Boolean) -> Unit)
         }
     }
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(Db.radiusSmall)).clickable { onChange(!checked) }
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable { onChange(!checked) }
             .padding(horizontal = Db.s2, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -151,16 +156,10 @@ private fun AppRow(app: AppEntry, checked: Boolean, onChange: (Boolean) -> Unit)
         }
         Spacer(Modifier.width(Db.s4))
         Column(Modifier.weight(1f)) {
-            Text(app.label, color = c.ink, style = Db.body, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(app.label, color = c.ink, style = Db.rowTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(app.pkg, color = c.muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Spacer(Modifier.width(Db.s3))
-        Switch(
-            checked = checked, onCheckedChange = onChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = c.onAccent, checkedTrackColor = c.accent, checkedBorderColor = c.accent,
-                uncheckedThumbColor = c.muted, uncheckedTrackColor = c.surfaceHigh, uncheckedBorderColor = c.faint,
-            ),
-        )
+        DbSwitch(checked, onChange)
     }
 }

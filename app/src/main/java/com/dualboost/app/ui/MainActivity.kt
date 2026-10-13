@@ -59,7 +59,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
-private enum class Screen { HOME, SETTINGS, APPS }
+private enum class Screen { HOME, SETTINGS, UPDATES, APPS }
 
 class MainActivity : ComponentActivity() {
 
@@ -180,7 +180,17 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
     }
 
     BackHandler(screen != Screen.HOME) {
-        screen = if (screen == Screen.APPS) Screen.SETTINGS else Screen.HOME
+        screen = if (screen == Screen.APPS || screen == Screen.UPDATES) Screen.SETTINGS else Screen.HOME
+    }
+
+    val changeSettings: ((com.dualboost.app.core.SettingsSnapshot) -> com.dualboost.app.core.SettingsSnapshot) -> Unit = { block ->
+        val before = settings.current.updateCheck
+        settings.update(block)
+        val after = settings.current.updateCheck
+        if (after != before) {
+            UpdateWorker.schedule(context, after, changed = true)
+            if (after.background) scope.launch { Updater.check(context) }
+        }
     }
 
     Box(Modifier.fillMaxSize().background(Db.colors.bg)) {
@@ -211,17 +221,10 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
                     s = s,
                     running = ui.phase == Phase.ON,
                     batteryUnrestricted = batteryOk,
-                    onChange = { block ->
-                        val before = settings.current.updateCheck
-                        settings.update(block)
-                        val after = settings.current.updateCheck
-                        if (after != before) {
-                            UpdateWorker.schedule(context, after, changed = true)
-                            if (after.background) scope.launch { Updater.check(context) }
-                        }
-                    },
+                    onChange = changeSettings,
                     onBack = { screen = Screen.HOME },
                     onOpenApps = { screen = Screen.APPS },
+                    onOpenUpdates = { screen = Screen.UPDATES },
                     onRestart = {
                         scope.launch {
                             BoostVpnService.stop(context)
@@ -235,10 +238,21 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
                     onDeveloper = { openDeveloperOptions(context) },
                     update = update,
                     canInstall = canInstall,
-                    selfInstalled = selfInstalled,
-                    onCheckNow = { scope.launch { Updater.check(context) } },
                     onUpdate = { installLatest() },
                     onAllowInstall = { allowInstalls() },
+                )
+                Screen.UPDATES -> UpdatesScreen(
+                    u = update,
+                    check = s.updateCheck,
+                    autoUpdate = s.autoUpdate,
+                    canInstall = canInstall,
+                    selfInstalled = selfInstalled,
+                    onCheckChange = { v -> changeSettings { it.copy(updateCheck = v) } },
+                    onAutoChange = { v -> changeSettings { it.copy(autoUpdate = v) } },
+                    onCheckNow = { scope.launch { Updater.check(context) } },
+                    onUpdate = { installLatest() },
+                    onAllow = { allowInstalls() },
+                    onBack = { screen = Screen.SETTINGS },
                 )
                 Screen.APPS -> AppsScreen(
                     excluded = s.excludedApps,
