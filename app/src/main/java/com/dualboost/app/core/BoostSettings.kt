@@ -21,6 +21,14 @@ enum class UpdateCheck(val label: String, val hours: Long) {
     val onOpen: Boolean get() = this != MANUAL
 }
 
+/** Which DNS servers the boost uses. AdGuard options block ads and trackers at the DNS level. */
+enum class DnsMode(val label: String, val v4: List<String>, val v6: List<String>) {
+    STANDARD("Standard", listOf("1.1.1.1", "8.8.8.8"), listOf("2606:4700:4700::1111", "2001:4860:4860::8888")),
+    ADGUARD("AdGuard", listOf("94.140.14.14", "94.140.15.15"), listOf("2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff")),
+    ADGUARD_FAMILY("AdGuard Family", listOf("94.140.14.15", "94.140.15.16"), listOf("2a10:50c0::bad1:ff", "2a10:50c0::bad2:ff")),
+    CUSTOM("Custom", emptyList(), emptyList()),
+}
+
 /** How traffic is shared between the two links. */
 enum class BoostMode { COMBINE, BACKUP }
 
@@ -43,6 +51,14 @@ data class SettingsSnapshot(
     val updateCheck: UpdateCheck = UpdateCheck.EVERY_6H,
     /** Download and install updates without asking first. */
     val autoUpdate: Boolean = true,
+    /** DNS servers used by the boost. */
+    val dnsMode: DnsMode = DnsMode.STANDARD,
+    /** Custom DNS server IPs, separated by commas or spaces (used with [DnsMode.CUSTOM]). */
+    val customDns: String = "",
+    /** Pass app traffic through the AdGuard app's local proxy (AdGuard in "Manual proxy" mode). */
+    val adguardProxy: Boolean = false,
+    /** Port of the AdGuard local proxy. */
+    val adguardPort: Int = 8080,
 )
 
 /** Persistent settings + mobile usage counter. Single instance per process. */
@@ -67,6 +83,11 @@ class BoostSettings private constructor(context: Context) {
         updateCheck = runCatching { UpdateCheck.valueOf(prefs.getString(K_UPD, null) ?: "EVERY_6H") }
             .getOrDefault(UpdateCheck.EVERY_6H),
         autoUpdate = prefs.getBoolean(K_AUTOUPD, true),
+        dnsMode = runCatching { DnsMode.valueOf(prefs.getString(K_DNS, null) ?: "STANDARD") }
+            .getOrDefault(DnsMode.STANDARD),
+        customDns = prefs.getString(K_DNS_CUSTOM, "") ?: "",
+        adguardProxy = prefs.getBoolean(K_AGP, false),
+        adguardPort = prefs.getInt(K_AGP_PORT, 8080),
     )
 
     fun update(block: (SettingsSnapshot) -> SettingsSnapshot) {
@@ -81,6 +102,10 @@ class BoostSettings private constructor(context: Context) {
             .putStringSet(K_EXCL, HashSet(next.excludedApps))
             .putString(K_UPD, next.updateCheck.name)
             .putBoolean(K_AUTOUPD, next.autoUpdate)
+            .putString(K_DNS, next.dnsMode.name)
+            .putString(K_DNS_CUSTOM, next.customDns)
+            .putBoolean(K_AGP, next.adguardProxy)
+            .putInt(K_AGP_PORT, next.adguardPort)
             .apply()
         _state.value = next
     }
@@ -125,6 +150,10 @@ class BoostSettings private constructor(context: Context) {
         private const val K_WANT = "want_running"
         private const val K_UPD = "update_check"
         private const val K_AUTOUPD = "auto_update"
+        private const val K_DNS = "dns_mode"
+        private const val K_DNS_CUSTOM = "dns_custom"
+        private const val K_AGP = "adguard_proxy"
+        private const val K_AGP_PORT = "adguard_port"
 
         @Volatile private var instance: BoostSettings? = null
 

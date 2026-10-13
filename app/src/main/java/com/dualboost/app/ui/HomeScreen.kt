@@ -57,7 +57,7 @@ data class IdleLinks(val wifi: Boolean, val mobile: Boolean)
 fun HomeScreen(
     ui: BoostUi,
     idle: IdleLinks,
-    mobileCapMb: Int,
+    settings: com.dualboost.app.core.SettingsSnapshot,
     onToggle: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenDeveloperOptions: () -> Unit,
@@ -98,12 +98,14 @@ fun HomeScreen(
                 LinkCard(Modifier.weight(1f).fillMaxHeight(), "Mobile data", R.drawable.ic_mobile, c.mobile, ui.mobile, idle.mobile, on)
             }
 
+            ProtectionCard(settings, ui, onOpenSettings)
+
             Notices(ui, on, now, update, canInstall, onUpdate, onAllowInstall, onOpenDeveloperOptions, onDismissError)
 
             Spacer(Modifier.height(Db.s3))
             ChartCard(ui, on)
             Spacer(Modifier.height(Db.s3))
-            StatsCard(ui, on, now, mobileCapMb)
+            StatsCard(ui, on, now, settings.mobileCapMb)
 
             Spacer(Modifier.height(Db.s4))
             Text(

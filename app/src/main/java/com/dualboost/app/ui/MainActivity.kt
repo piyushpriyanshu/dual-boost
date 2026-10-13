@@ -207,7 +207,7 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
                 Screen.HOME -> HomeScreen(
                     ui = ui,
                     idle = idle,
-                    mobileCapMb = s.mobileCapMb,
+                    settings = s,
                     onToggle = { if (ui.phase == Phase.ON) BoostVpnService.stop(context) else start() },
                     onOpenSettings = { screen = Screen.SETTINGS },
                     onOpenDeveloperOptions = { openDeveloperOptions(context) },
@@ -219,20 +219,12 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
                 )
                 Screen.SETTINGS -> SettingsScreen(
                     s = s,
-                    running = ui.phase == Phase.ON,
+                    ui = ui,
                     batteryUnrestricted = batteryOk,
                     onChange = changeSettings,
                     onBack = { screen = Screen.HOME },
                     onOpenApps = { screen = Screen.APPS },
                     onOpenUpdates = { screen = Screen.UPDATES },
-                    onRestart = {
-                        scope.launch {
-                            BoostVpnService.stop(context)
-                            withTimeoutOrNull(8_000) { BoostState.ui.first { it.phase == Phase.OFF } }
-                            BoostVpnService.start(context)
-                            screen = Screen.HOME
-                        }
-                    },
                     onAlwaysOn = { open(context, Intent(Settings.ACTION_VPN_SETTINGS)) },
                     onBattery = { openBattery(context, batteryOk) },
                     onDeveloper = { openDeveloperOptions(context) },

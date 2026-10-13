@@ -31,13 +31,12 @@ private fun capLabel(mb: Int) = when (mb) { 0 -> "Off"; 500 -> "500 MB"; else ->
 @Composable
 fun SettingsScreen(
     s: SettingsSnapshot,
-    running: Boolean,
+    ui: com.dualboost.app.core.BoostUi,
     batteryUnrestricted: Boolean,
     onChange: ((SettingsSnapshot) -> SettingsSnapshot) -> Unit,
     onBack: () -> Unit,
     onOpenApps: () -> Unit,
     onOpenUpdates: () -> Unit,
-    onRestart: () -> Unit,
     onAlwaysOn: () -> Unit,
     onBattery: () -> Unit,
     onDeveloper: () -> Unit,
@@ -57,15 +56,6 @@ fun SettingsScreen(
     ) {
         TopBar("Settings", onBack)
 
-        if (running) {
-            Spacer(Modifier.height(Db.s4))
-            NoticeCard(
-                "Restart to apply",
-                "Wi-Fi mode, IPv6 and excluded apps apply after a restart.",
-                c.primary, R.drawable.ic_restart,
-                action = "Restart", onAction = onRestart,
-            )
-        }
         if (update.phase == UpdatePhase.AVAILABLE) {
             Spacer(Modifier.height(Db.s3))
             UpdateNotice(update, canInstall, onUpdate, onAllowInstall)
@@ -134,6 +124,9 @@ fun SettingsScreen(
                 onClick = onOpenApps,
             )
         }
+
+        // ---- Ad blocking (DNS + AdGuard app)
+        AdBlockSection(s, ui, onChange)
 
         // ---- Updates
         SectionHeader("Updates")
