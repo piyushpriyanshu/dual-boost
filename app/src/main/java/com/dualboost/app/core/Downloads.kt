@@ -364,7 +364,10 @@ object Downloads {
                 // ---- launch workers on the links available right now
                 val workers = ArrayList<Thread>()
                 if (ranged) {
-                    val usable = links.all.filter { it.isUp && (it.type == LinkType.WIFI || mobileAllowed()) }
+                    val up = links.all.filter { it.isUp && (it.type == LinkType.WIFI || mobileAllowed()) }
+                    // If both at once tested slower than one link (see SpeedTest), use that link only.
+                    val only = SpeedTest.onlyLink(context, links.wifi.network)
+                    val usable = up.filter { it.type == only }.ifEmpty { up }
                     val perLink = if (usable.size > 1) WORKERS_PER_LINK else WORKERS_SINGLE_LINK
                     for (link in usable) repeat(perLink) {
                         workers += Thread({ rangeWorker(job, link, pr, channel, ::mobileAllowed) }, "dl-${link.type}-$it")

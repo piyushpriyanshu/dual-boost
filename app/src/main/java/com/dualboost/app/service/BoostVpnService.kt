@@ -124,7 +124,8 @@ class BoostVpnService : VpnService() {
                 r.mobile?.downMbps?.takeIf { it > 0.5 }?.let { lm.mobile.capacity = it * 1e6 / 8 }
                 Diag.i(TAG, "seeded link speeds from speed test: ${SpeedTest.summary(r)}")
             }
-            val bal = Balancer(lm, { settings.current }, { capReached })
+            val bal = Balancer(lm, { settings.current }, { capReached }, { SpeedTest.onlyLink(this, lm.wifi.network) })
+            SpeedTest.onlyLink(this, lm.wifi.network)?.let { Diag.w(TAG, "combine guard on: last speed test showed both links together slower; using $it only") }
             balancer = bal
             val rs = RelayServer(lm, bal, { n -> mobilePending.addAndGet(n) }, ::ownerOf)
             relay = rs

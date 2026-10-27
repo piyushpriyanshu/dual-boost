@@ -14,12 +14,18 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * BACKUP: Wi-Fi only, mobile data takes over instantly if Wi-Fi fails.
  *
+ * Combine guard: if the last speed test proved that using both at once is slower than one link
+ * alone (radio interference, or both sharing one connection), COMBINE sends traffic over that
+ * faster link only and keeps the other as instant backup — so the boost can never make you slower.
+ *
  * The returned list is an ordered preference: if the first link fails, the next is tried.
  */
 class Balancer(
     private val links: LinkMonitor,
     private val settings: () -> SettingsSnapshot,
     private val mobileCapReached: () -> Boolean,
+    /** The single link to use when combining was measured to be slower (null = combine). */
+    private val onlyLink: () -> LinkType? = { null },
 ) {
     private class Sticky(val type: LinkType, @Volatile var until: Long)
     private val sticky = ConcurrentHashMap<InetAddress, Sticky>()
@@ -77,6 +83,7 @@ class Balancer(
             s.mode == BoostMode.BACKUP || capHit ->
                 if (!wifi.inPenalty(now)) wifi else mobile
             udp && port == 53 -> fastest(wifi, mobile, now) // DNS: lowest latency
+            guardLink(pool, now) != null -> guardLink(pool, now)!!
             else -> {
                 val pinned = if (s.stickySites && dst != null) sticky[dst] else null
                 if (pinned != null && pinned.until > now) {
@@ -94,6 +101,12 @@ class Balancer(
         val rest = up.filter { it !== primary }
             .sortedBy { if (it.isGood) 0 else if (it.validated) 1 else 2 }
         return listOf(primary) + rest
+    }
+
+    /** The combine-guard link, if the guard is on and that link is usable right now. */
+    private fun guardLink(pool: List<Link>, now: Long): Link? {
+        val t = onlyLink() ?: return null // checked per connection: follows Wi-Fi changes at once
+        return pool.firstOrNull { it.type == t && !it.inPenalty(now) }
     }
 
     private val decisions = java.util.concurrent.atomic.AtomicInteger()
