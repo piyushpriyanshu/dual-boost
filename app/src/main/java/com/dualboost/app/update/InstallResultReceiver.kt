@@ -1,5 +1,6 @@
 package com.dualboost.app.update
 
+import com.dualboost.app.core.Diag
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -41,7 +42,7 @@ class InstallResultReceiver : BroadcastReceiver() {
                 Updater.onInstallerResult(UpdatePhase.AVAILABLE, "Update cancelled. Tap Update to try again.")
             }
             else -> {
-                Log.w("DualBoost/Update", "install failed: $status $msg")
+                Diag.w("DualBoost/Update", "install failed: $status $msg")
                 Updater.onInstallerResult(UpdatePhase.ERROR, "Install failed: ${msg ?: "status $status"}")
             }
         }

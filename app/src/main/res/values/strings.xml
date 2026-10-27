@@ -3,4 +3,11 @@
     <string name="app_name">DualBoost</string>
     <string name="tile_label">DualBoost</string>
     <string name="notif_channel">Boost status</string>
+    <string name="widget_description">Live combined speed with a Start/Stop button</string>
+    <string name="sc_toggle">Start / Stop</string>
+    <string name="sc_toggle_long">Start or stop the boost</string>
+    <string name="sc_speed">Speed test</string>
+    <string name="sc_downloads">Downloads</string>
+    <string name="sc_diag">Diagnostics</string>
+    <string name="share_label">Download with DualBoost</string>
 </resources>

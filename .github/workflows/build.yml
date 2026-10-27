@@ -24,6 +24,15 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Apply DualBoost engine patches
+        run: |
+          cd app/src/main/jni/hev-socks5-tunnel
+          for p in "$GITHUB_WORKSPACE"/patches/*.patch; do
+            echo "Applying $(basename "$p")"
+            git apply --whitespace=nowarn "$p"
+          done
+          git diff --stat
+
       - name: Version from commit count (only releases on main advance it)
         run: |
           # +2 keeps numbering above the earlier run-number based releases (last was 1.0.8).

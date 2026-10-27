@@ -1,5 +1,6 @@
 package com.dualboost.app.update
 
+import com.dualboost.app.core.Diag
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -91,7 +92,7 @@ object Updater {
                     null
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "check failed", e)
+                Diag.w(TAG, "check failed", e)
                 _ui.value = _ui.value.copy(phase = UpdatePhase.ERROR, message = "Couldn't reach GitHub. Check your connection.")
                 null
             }
@@ -133,7 +134,7 @@ object Updater {
                 install(context, apk)
                 true
             } catch (e: Exception) {
-                Log.w(TAG, "update failed", e)
+                Diag.w(TAG, "update failed", e)
                 _ui.value = _ui.value.copy(phase = UpdatePhase.ERROR, message = "Update failed: ${e.message ?: "unknown error"}")
                 false
             }

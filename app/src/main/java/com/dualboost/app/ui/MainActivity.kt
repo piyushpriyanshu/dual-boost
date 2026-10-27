@@ -59,12 +59,16 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
-private enum class Screen { HOME, SETTINGS, UPDATES, APPS }
+private enum class Screen { HOME, SETTINGS, UPDATES, APPS, SPEED, DOWNLOADS, DIAGNOSTICS, REPORT }
+
+/** A request coming from a notification, shortcut, widget or share. */
+private data class NavRequest(val screen: Screen? = null, val toggle: Boolean = false, val url: String? = null)
 
 class MainActivity : ComponentActivity() {
 
     /** Set when the user taps an "update available" notification. */
     private val updateTapped = MutableStateFlow(false)
+    private val navRequest = MutableStateFlow<NavRequest?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -75,9 +79,12 @@ class MainActivity : ComponentActivity() {
                 it.copy(mobileTodayBytes = settings.mobileUsedToday(), wifiTodayBytes = settings.wifiUsedToday())
             }
         }
-        handleIntent(intent)
+        // Act on a shortcut/widget/share intent only once: not again after rotation or process restore,
+        // and not when the app is reopened from Recents (which replays the original intent).
+        val fromHistory = (intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+        if (savedInstanceState == null && !fromHistory) handleIntent(intent)
         setContent {
-            DualBoostTheme { App(settings, updateTapped) }
+            DualBoostTheme { App(settings, updateTapped, navRequest) }
         }
     }
 
@@ -87,9 +94,32 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        if (intent?.getBooleanExtra(EXTRA_OPEN_UPDATE, false) == true) {
+        if (intent == null) return
+        if (intent.getBooleanExtra(EXTRA_OPEN_UPDATE, false)) {
             intent.removeExtra(EXTRA_OPEN_UPDATE)
             updateTapped.value = true
+        }
+        val req = when (intent.action) {
+            ACTION_TOGGLE -> NavRequest(toggle = true)
+            ACTION_SPEEDTEST -> NavRequest(Screen.SPEED)
+            ACTION_DOWNLOADS -> NavRequest(Screen.DOWNLOADS)
+            ACTION_DIAGNOSTICS -> NavRequest(Screen.DIAGNOSTICS)
+            Intent.ACTION_SEND -> {
+                val url = com.dualboost.app.core.Downloads.extractUrl(intent.getStringExtra(Intent.EXTRA_TEXT))
+                if (url != null) {
+                    com.dualboost.app.service.DownloadService.start(this, url)
+                    Toast.makeText(this, "Downloading with both links…", Toast.LENGTH_SHORT).show()
+                    NavRequest(Screen.DOWNLOADS)
+                } else {
+                    Toast.makeText(this, "No download link found in what was shared.", Toast.LENGTH_LONG).show()
+                    null
+                }
+            }
+            else -> null
+        }
+        if (req != null) {
+            navRequest.value = req
+            intent.action = null // don't repeat on rotation
         }
     }
 
@@ -105,18 +135,28 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_OPEN_UPDATE = "open_update"
+        const val ACTION_TOGGLE = "com.dualboost.app.action.TOGGLE"
+        const val ACTION_SPEEDTEST = "com.dualboost.app.action.SPEEDTEST"
+        const val ACTION_DOWNLOADS = "com.dualboost.app.action.DOWNLOADS"
+        const val ACTION_DIAGNOSTICS = "com.dualboost.app.action.DIAGNOSTICS"
     }
 }
 
 @Composable
-private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>) {
+private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>, navRequest: MutableStateFlow<NavRequest?>) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val ui by BoostState.ui.collectAsStateWithLifecycle()
     val s by settings.state.collectAsStateWithLifecycle()
     val update by Updater.ui.collectAsStateWithLifecycle()
     val tapped by updateTapped.collectAsStateWithLifecycle()
-    var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
+    // Back stack, saved as "HOME,SETTINGS,…" so it survives rotation.
+    var stackStr by rememberSaveable { mutableStateOf("HOME") }
+    val stack = stackStr.split(',').map { Screen.valueOf(it) }
+    val screen = stack.last()
+    fun go(to: Screen) { if (screen != to) stackStr = (stack + to).joinToString(",") { it.name } }
+    fun back() { if (stack.size > 1) stackStr = stack.dropLast(1).joinToString(",") { it.name } }
+    val nav by navRequest.collectAsStateWithLifecycle()
     val idle = rememberIdleLinks()
 
     var batteryOk by remember { mutableStateOf(isBatteryUnrestricted(context)) }
@@ -181,8 +221,17 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
         else startWithVpnPermission()
     }
 
-    BackHandler(screen != Screen.HOME) {
-        screen = if (screen == Screen.APPS || screen == Screen.UPDATES) Screen.SETTINGS else Screen.HOME
+    BackHandler(stack.size > 1) { back() }
+
+    // Shortcut / widget / share requests
+    LaunchedEffect(nav) {
+        val r = nav ?: return@LaunchedEffect
+        navRequest.value = null
+        if (r.toggle) {
+            stackStr = "HOME"
+            if (BoostState.ui.value.phase == Phase.ON) BoostVpnService.stop(context) else start()
+        }
+        r.screen?.let { stackStr = "HOME," + it.name }
     }
 
     val changeSettings: ((com.dualboost.app.core.SettingsSnapshot) -> com.dualboost.app.core.SettingsSnapshot) -> Unit = { block ->
@@ -198,21 +247,24 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
     androidx.compose.runtime.CompositionLocalProvider(LocalSpeedUnit provides s.speedUnit) {
     Box(Modifier.fillMaxSize().background(Db.colors.bg)) {
         AnimatedContent(
-            targetState = screen,
+            targetState = stackStr,
             transitionSpec = {
-                val forward = targetState.ordinal > initialState.ordinal
+                val forward = targetState.count { it == ',' } >= initialState.count { it == ',' }
                 (slideInHorizontally(tween(320)) { w -> if (forward) w / 3 else -w / 3 } + fadeIn(tween(320)))
                     .togetherWith(slideOutHorizontally(tween(320)) { w -> if (forward) -w / 3 else w / 3 } + fadeOut(tween(200)))
             },
             label = "screens",
-        ) { target ->
-            when (target) {
+        ) { targetStack ->
+            when (Screen.valueOf(targetStack.substringAfterLast(','))) {
                 Screen.HOME -> HomeScreen(
                     ui = ui,
                     idle = idle,
                     settings = s,
                     onToggle = { if (ui.phase == Phase.ON) BoostVpnService.stop(context) else start() },
-                    onOpenSettings = { screen = Screen.SETTINGS },
+                    onOpenSettings = { go(Screen.SETTINGS) },
+                    onOpenSpeedTest = { go(Screen.SPEED) },
+                    onOpenDownloads = { go(Screen.DOWNLOADS) },
+                    onOpenDiagnostics = { go(Screen.DIAGNOSTICS) },
                     onOpenDeveloperOptions = { openDeveloperOptions(context) },
                     onDismissError = { BoostState.update { it.copy(error = null) } },
                     update = update,
@@ -225,9 +277,11 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
                     ui = ui,
                     batteryUnrestricted = batteryOk,
                     onChange = changeSettings,
-                    onBack = { screen = Screen.HOME },
-                    onOpenApps = { screen = Screen.APPS },
-                    onOpenUpdates = { screen = Screen.UPDATES },
+                    onBack = { back() },
+                    onOpenApps = { go(Screen.APPS) },
+                    onOpenUpdates = { go(Screen.UPDATES) },
+                    onOpenDiagnostics = { go(Screen.DIAGNOSTICS) },
+                    onOpenReport = { go(Screen.REPORT) },
                     onAlwaysOn = { open(context, Intent(Settings.ACTION_VPN_SETTINGS)) },
                     onBattery = { openBattery(context, batteryOk) },
                     onDeveloper = { openDeveloperOptions(context) },
@@ -247,17 +301,17 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
                     onCheckNow = { scope.launch { Updater.check(context) } },
                     onUpdate = { installLatest() },
                     onAllow = { allowInstalls() },
-                    onBack = { screen = Screen.SETTINGS },
+                    onBack = { back() },
                 )
-                Screen.APPS -> AppsScreen(
-                    excluded = s.excludedApps,
-                    onToggle = { pkg, on ->
-                        settings.update { cur ->
-                            cur.copy(excludedApps = if (on) cur.excludedApps + pkg else cur.excludedApps - pkg)
-                        }
-                    },
-                    onBack = { screen = Screen.SETTINGS },
+                Screen.APPS -> AppRulesScreen(s = s, onChange = changeSettings, onBack = { back() })
+                Screen.SPEED -> SpeedTestScreen(onBack = { back() })
+                Screen.DOWNLOADS -> DownloadsScreen(
+                    s = s, prefillUrl = null, onPrefillUsed = {}, onChange = changeSettings, onBack = { back() },
                 )
+                Screen.DIAGNOSTICS -> DiagnosticsScreen(
+                    onBack = { back() }, onSpeedTest = { go(Screen.SPEED) }, onReport = { go(Screen.REPORT) },
+                )
+                Screen.REPORT -> ReportScreen(onBack = { back() })
             }
         }
     }

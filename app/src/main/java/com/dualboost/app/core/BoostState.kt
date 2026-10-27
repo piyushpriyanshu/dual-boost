@@ -15,6 +15,13 @@ data class LinkUi(
     val upMbps: Double = 0.0,
     val connections: Int = 0,
     val sessionBytes: Long = 0,
+    /** Latest health-probe connect time in ms (-1 = unknown). */
+    val rttMs: Int = -1,
+    val jitterMs: Int = -1,
+    val lossPercent: Int = -1,
+    /** Learned capacity in Mbps, used by the balancer. */
+    val capacityMbps: Double = 0.0,
+    val healthy: Boolean = true,
 )
 
 data class BoostUi(

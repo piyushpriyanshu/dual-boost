@@ -21,6 +21,28 @@ enum class UpdateCheck(val label: String, val hours: Long) {
     val onOpen: Boolean get() = this != MANUAL
 }
 
+/**
+ * How one app's connections are routed. Bypass is handled separately (excludedApps):
+ * those apps don't enter DualBoost at all.
+ */
+enum class AppRule(val label: String, val detail: String) {
+    BOTH("Both links", "Default. Uses Wi-Fi and mobile data together"),
+    LOW_PING("Low ping", "Games and calls: stays on whichever link has the lowest ping"),
+    WIFI_ONLY("Wi-Fi only", "Never uses mobile data"),
+    MOBILE("Mobile data", "Uses mobile data, Wi-Fi only if mobile is unavailable"),
+}
+
+/** Popular games and call apps that get Low ping automatically while Low-ping mode is on. */
+val LOW_PING_PRESETS = setOf(
+    "com.pubg.imobile", "com.tencent.ig", "com.dts.freefireth", "com.dts.freefiremax",
+    "com.activision.callofduty.shooter", "com.garena.game.codm", "com.mobile.legends",
+    "com.riotgames.league.wildrift", "com.supercell.clashofclans", "com.supercell.clashroyale",
+    "com.supercell.brawlstars", "com.miHoYo.GenshinImpact", "com.valorant.mobile",
+    "com.whatsapp", "com.whatsapp.w4b", "org.telegram.messenger", "com.discord",
+    "us.zoom.videomeetings", "com.google.android.apps.meetings", "com.google.android.apps.tachyon",
+    "com.microsoft.teams", "com.skype.raider", "com.Slack",
+)
+
 /** How speeds are shown. AUTO switches to Kbps below 1 Mbps. */
 enum class SpeedUnit(val label: String) { MBPS("Mbps"), KBPS("Kbps"), AUTO("Auto") }
 
@@ -50,6 +72,10 @@ data class SettingsSnapshot(
     val autoStart: Boolean = false,
     /** Apps that bypass DualBoost entirely. */
     val excludedApps: Set<String> = emptySet(),
+    /** Per-app routing rules (apps not listed use [AppRule.BOTH]). */
+    val appRules: Map<String, AppRule> = emptyMap(),
+    /** Games and calls stay on the lowest-ping link (presets + apps set to Low ping). */
+    val lowPingMode: Boolean = true,
     /** When to look for updates. */
     val updateCheck: UpdateCheck = UpdateCheck.EVERY_6H,
     /** Download and install updates without asking first. */
@@ -60,7 +86,16 @@ data class SettingsSnapshot(
     val customDns: String = "",
     /** Unit used to display speeds everywhere (app, notification, Quick Settings tile). */
     val speedUnit: SpeedUnit = SpeedUnit.MBPS,
+    /** The download booster may use mobile data (always within the daily limit). */
+    val downloadsUseMobile: Boolean = true,
 )
+
+/** The rule that actually applies to [pkg] (explicit rule, else Low-ping preset, else Both). */
+fun SettingsSnapshot.ruleFor(pkg: String?): AppRule {
+    if (pkg == null) return AppRule.BOTH
+    appRules[pkg]?.let { return if (it == AppRule.LOW_PING && !lowPingMode) AppRule.BOTH else it }
+    return if (lowPingMode && pkg in LOW_PING_PRESETS) AppRule.LOW_PING else AppRule.BOTH
+}
 
 /** Persistent settings + mobile usage counter. Single instance per process. */
 class BoostSettings private constructor(context: Context) {
@@ -81,6 +116,12 @@ class BoostSettings private constructor(context: Context) {
         ipv6 = prefs.getBoolean(K_V6, true),
         autoStart = prefs.getBoolean(K_AUTO, false),
         excludedApps = prefs.getStringSet(K_EXCL, emptySet())?.toSet() ?: emptySet(),
+        appRules = (prefs.getStringSet(K_RULES, emptySet()) ?: emptySet()).mapNotNull { e ->
+            val pkg = e.substringBeforeLast('=', "")
+            val rule = runCatching { AppRule.valueOf(e.substringAfterLast('=')) }.getOrNull()
+            if (pkg.isNotEmpty() && rule != null) pkg to rule else null
+        }.toMap(),
+        lowPingMode = prefs.getBoolean(K_LOWPING, true),
         updateCheck = runCatching { UpdateCheck.valueOf(prefs.getString(K_UPD, null) ?: "EVERY_6H") }
             .getOrDefault(UpdateCheck.EVERY_6H),
         autoUpdate = prefs.getBoolean(K_AUTOUPD, true),
@@ -89,6 +130,7 @@ class BoostSettings private constructor(context: Context) {
         customDns = prefs.getString(K_DNS_CUSTOM, "") ?: "",
         speedUnit = runCatching { SpeedUnit.valueOf(prefs.getString(K_UNIT, null) ?: "MBPS") }
             .getOrDefault(SpeedUnit.MBPS),
+        downloadsUseMobile = prefs.getBoolean(K_DL_MOBILE, true),
     )
 
     fun update(block: (SettingsSnapshot) -> SettingsSnapshot) {
@@ -101,11 +143,14 @@ class BoostSettings private constructor(context: Context) {
             .putBoolean(K_V6, next.ipv6)
             .putBoolean(K_AUTO, next.autoStart)
             .putStringSet(K_EXCL, HashSet(next.excludedApps))
+            .putStringSet(K_RULES, next.appRules.map { "${it.key}=${it.value.name}" }.toHashSet())
+            .putBoolean(K_LOWPING, next.lowPingMode)
             .putString(K_UPD, next.updateCheck.name)
             .putBoolean(K_AUTOUPD, next.autoUpdate)
             .putString(K_DNS, next.dnsMode.name)
             .putString(K_DNS_CUSTOM, next.customDns)
             .putString(K_UNIT, next.speedUnit.name)
+            .putBoolean(K_DL_MOBILE, next.downloadsUseMobile)
 
             .apply()
         _state.value = next
@@ -167,6 +212,9 @@ class BoostSettings private constructor(context: Context) {
         private const val K_DNS = "dns_mode"
         private const val K_DNS_CUSTOM = "dns_custom"
         private const val K_UNIT = "speed_unit"
+        private const val K_RULES = "app_rules"
+        private const val K_LOWPING = "low_ping_mode"
+        private const val K_DL_MOBILE = "dl_use_mobile"
         private const val K_WIFI_USED = "wifi_used"
 
         @Volatile private var instance: BoostSettings? = null

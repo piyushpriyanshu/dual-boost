@@ -517,3 +517,16 @@ fun AppIcon(size: Dp) {
         )
     }
 }
+
+/** Full-width secondary pill (soft background), paired with [MainButton]. */
+@Composable
+fun SecondaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val c = Db.colors
+    Box(
+        modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(50)).background(c.surfaceHigh)
+            .clickable(role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, color = c.ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
