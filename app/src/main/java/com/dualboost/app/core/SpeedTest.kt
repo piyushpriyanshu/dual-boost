@@ -38,6 +38,12 @@ data class SpeedResult(
      * other one as instant backup.
      */
     val onlyLink: LinkType? = null,
+    /**
+     * The Wi-Fi connection the test ran on (Android's network handle). The verdict only applies
+     * while that same connection is up: joining another Wi-Fi, or turning Wi-Fi off and on, gives a
+     * new handle and combining starts again.
+     */
+    val wifiHandle: Long? = null,
 ) {
     val bestSingleDown: Double? get() = listOfNotNull(wifi?.downMbps, mobile?.downMbps).maxOrNull()
 }
@@ -115,7 +121,7 @@ object SpeedTest {
     private const val WARMUP_MS = 1_500L
     /** Combining counts as harmful only when clearly below the faster single link. */
     private const val HURT_RATIO = 0.85
-    /** How long a "combining hurts" verdict steers the boost before a new test is needed. */
+    /** Longest a "combining hurts" verdict steers the boost, even on the same Wi-Fi connection. */
     private const val GUARD_MS = 24 * 3_600_000L
 
     private val UA = "Mozilla/5.0 (Linux; Android ${Build.VERSION.RELEASE}; ${Build.MODEL}) AppleWebKit/537.36 " +
@@ -141,12 +147,37 @@ object SpeedTest {
     }
 
     /**
-     * The only link the boost should use for speed, when the last test (under 24 h old) showed that
-     * using both at once is slower than this link alone. Null = combine normally.
+     * The only link the boost should use for speed, when the last test showed that using both at once
+     * is slower than this link alone. Applies only on the same Wi-Fi connection the test ran on, and
+     * for at most 24 h. Null = combine normally.
+     * [wifi] = the current Wi-Fi network (looked up when not given).
      */
-    fun onlyLink(context: Context): LinkType? {
+    fun onlyLink(context: Context, wifi: Network? = currentWifi(context)): LinkType? {
         val r = lastResult(context) ?: return null
-        return r.onlyLink?.takeIf { System.currentTimeMillis() - r.at < GUARD_MS }
+        val only = r.onlyLink ?: return null
+        if (System.currentTimeMillis() - r.at >= GUARD_MS) return null
+        val now = wifi?.networkHandle ?: return null // no Wi-Fi: nothing to combine anyway
+        return only.takeIf { r.wifiHandle == now }
+    }
+
+    @Volatile private var wifiCache: Pair<Long, Network?>? = null
+
+    /** Current Wi-Fi network with internet (cached for 3 s: callers may ask often). */
+    private fun currentWifi(context: Context): Network? {
+        val now = System.currentTimeMillis()
+        wifiCache?.let { (at, n) -> if (now - at < 3_000) return n }
+        val n = runCatching {
+            val cm = context.getSystemService(android.net.ConnectivityManager::class.java)
+            @Suppress("DEPRECATION")
+            cm.allNetworks.firstOrNull { net ->
+                cm.getNetworkCapabilities(net)?.let {
+                    it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) &&
+                        it.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                } == true
+            }
+        }.getOrNull()
+        wifiCache = now to n
+        return n
     }
 
     fun start(context: Context) {
@@ -307,7 +338,8 @@ object SpeedTest {
             val problem = if (missing.isEmpty()) null else
                 "Couldn't measure ${missing.joinToString(", ")}: no test server answered" +
                     (problems.firstOrNull()?.let { " ($it)" } ?: "") + ". Check that the link has internet and try again."
-            res = res.copy(at = System.currentTimeMillis(), mobileBytes = mobileBytes, problem = problem, onlyLink = onlyLink)
+            res = res.copy(at = System.currentTimeMillis(), mobileBytes = mobileBytes, problem = problem, onlyLink = onlyLink,
+                wifiHandle = wifiNet?.networkHandle)
 
             if (res.wifi?.downMbps == null && res.mobile?.downMbps == null) {
                 // Nothing measured at all: keep the previous good result, report the failure.
@@ -611,7 +643,7 @@ object SpeedTest {
         put("at", r.at); put("mb", r.mobileBytes)
         r.combinedDown?.let { put("cd", it) }; r.combinedUp?.let { put("cu", it) }
         r.wifi?.let { put("w", linkJson(it)) }; r.mobile?.let { put("m", linkJson(it)) }
-        r.problem?.let { put("pr", it) }; r.onlyLink?.let { put("ol", it.name) }
+        r.problem?.let { put("pr", it) }; r.onlyLink?.let { put("ol", it.name) }; r.wifiHandle?.let { put("wh", it) }
     }
 
     private fun linkJson(l: LinkSpeed) = JSONObject().apply {
@@ -634,6 +666,7 @@ object SpeedTest {
             o.optLong("mb"),
             o.optString("pr").takeIf { it.isNotEmpty() },
             o.optString("ol").takeIf { it.isNotEmpty() }?.let { n -> runCatching { LinkType.valueOf(n) }.getOrNull() },
+            if (o.has("wh")) o.getLong("wh") else null,
         )
     }
 }

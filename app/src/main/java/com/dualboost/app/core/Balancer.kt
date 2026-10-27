@@ -105,7 +105,7 @@ class Balancer(
 
     /** The combine-guard link, if the guard is on and that link is usable right now. */
     private fun guardLink(pool: List<Link>, now: Long): Link? {
-        val t = onlyLink() ?: return null
+        val t = onlyLink() ?: return null // checked per connection: follows Wi-Fi changes at once
         return pool.firstOrNull { it.type == t && !it.inPenalty(now) }
     }
 

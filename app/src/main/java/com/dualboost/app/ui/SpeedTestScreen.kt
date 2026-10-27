@@ -47,6 +47,8 @@ fun SpeedTestScreen(onBack: () -> Unit) {
     val st by SpeedTest.ui.collectAsStateWithLifecycle()
     val saved = remember(st.stage) { SpeedTest.lastResult(context) }
     val result: SpeedResult? = if (st.stage == TestStage.IDLE) saved else st.partial ?: saved
+    // The verdict counts only while still on the Wi-Fi connection it was measured on.
+    val onlyNow = if (st.running) null else SpeedTest.onlyLink(context)
 
     Box(Modifier.fillMaxSize().background(c.bg)) {
         Column(
@@ -72,7 +74,7 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                         st.running && st.stage != TestStage.PREPARING && st.stage != TestStage.PING -> st.liveMbps
                         st.running -> null
                         // When combining tested slower, the boost uses the faster link: show that, not the lower number.
-                        result?.onlyLink != null -> result.bestSingleDown
+                        onlyNow != null -> result?.bestSingleDown
                         else -> result?.combinedDown ?: result?.wifi?.downMbps ?: result?.mobile?.downMbps
                     }
                     if (headline != null) {
@@ -82,8 +84,8 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                         Text(
                             when {
                                 st.running -> "${sp.unit} · ${st.stage.label.lowercase(Locale.US)}"
-                                result?.onlyLink == com.dualboost.app.core.LinkType.WIFI -> "${sp.unit} on Wi-Fi (faster than both together)"
-                                result?.onlyLink != null -> "${sp.unit} on mobile (faster than both together)"
+                                onlyNow == com.dualboost.app.core.LinkType.WIFI -> "${sp.unit} on Wi-Fi (faster than both together)"
+                                onlyNow != null -> "${sp.unit} on mobile (faster than both together)"
                                 result?.combinedDown != null -> "${sp.unit} combined download"
                                 else -> "${sp.unit} download"
                             },
@@ -138,7 +140,7 @@ fun SpeedTestScreen(onBack: () -> Unit) {
             val combined = result?.combinedDown
             val gain = if (best != null && best > 0.5 && combined != null) combined / best else null
             val msg = st.message
-            val only = result?.onlyLink
+            val only = onlyNow
             fun f(v: Double) = formatSpeed(v, unit).toString()
             val onlyName = if (only == com.dualboost.app.core.LinkType.WIFI) "Wi-Fi" else "mobile data"
             val note: String = when {
@@ -149,7 +151,11 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                     "Both at once gave ${f(combined)}, slower than $onlyName alone (${f(best)}). " +
                         "This usually means 2.4 GHz Wi-Fi is interfering with 4G inside the phone, or both links share one connection.\n\n" +
                         "So the boost now uses $onlyName only and keeps the other link as instant backup. It will never make you slower. " +
-                        "Use 5 GHz Wi-Fi if you can, then run the test again."
+                        "Use 5 GHz Wi-Fi if you can, then run the test again. " +
+                        "On a different Wi-Fi, or after turning Wi-Fi off and on, combining starts again automatically."
+                result?.onlyLink != null ->
+                    "In this test both together were slower than your fastest link, but you're on a different Wi-Fi connection now " +
+                        "(or it's been over a day), so the boost combines both links again. Run the test to check this connection."
                 gain != null && gain >= 1.1 ->
                     "Using both links together is ${String.format(Locale.US, "%.1f", gain)}× your fastest single link. " +
                         "That's the most DualBoost can give busy apps and downloads."
