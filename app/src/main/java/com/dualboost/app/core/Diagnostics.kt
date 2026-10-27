@@ -229,6 +229,14 @@ object Diagnostics {
         pingChecks("mobile", mobile)
 
         SpeedTest.lastResult(context)?.let { r ->
+            SpeedTest.onlyLink(context)?.let { only ->
+                val c = r.combinedDown; val b = r.bestSingleDown
+                v += Verdict(Severity.WARN, "Using both links at once was slower",
+                    "In your last speed test both together gave ${"%.0f".format(c ?: 0.0)} Mbps vs ${"%.0f".format(b ?: 0.0)} Mbps on " +
+                        "${if (only == LinkType.WIFI) "Wi-Fi" else "mobile"} alone, so the boost now uses only that link (the other stays as backup). " +
+                        (if (wifi.band == "2.4 GHz") "Your Wi-Fi is on 2.4 GHz, which often clashes with 4G inside the phone: switch to 5 GHz, then run the speed test again."
+                        else "This happens when Wi-Fi and 4G interfere or share one connection. Run the speed test again after changing network."))
+            }
             val w = r.wifi?.downMbps; val m = r.mobile?.downMbps
             if (w != null && m != null && w > 1 && m > 1) {
                 if (m < w * 0.15) v += Verdict(Severity.INFO, "Mobile is much slower than Wi-Fi",

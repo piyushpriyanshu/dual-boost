@@ -71,6 +71,8 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                     val headline: Double? = when {
                         st.running && st.stage != TestStage.PREPARING && st.stage != TestStage.PING -> st.liveMbps
                         st.running -> null
+                        // When combining tested slower, the boost uses the faster link: show that, not the lower number.
+                        result?.onlyLink != null -> result.bestSingleDown
                         else -> result?.combinedDown ?: result?.wifi?.downMbps ?: result?.mobile?.downMbps
                     }
                     if (headline != null) {
@@ -80,6 +82,8 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                         Text(
                             when {
                                 st.running -> "${sp.unit} · ${st.stage.label.lowercase(Locale.US)}"
+                                result?.onlyLink == com.dualboost.app.core.LinkType.WIFI -> "${sp.unit} on Wi-Fi (faster than both together)"
+                                result?.onlyLink != null -> "${sp.unit} on mobile (faster than both together)"
                                 result?.combinedDown != null -> "${sp.unit} combined download"
                                 else -> "${sp.unit} download"
                             },
@@ -130,21 +134,39 @@ fun SpeedTestScreen(onBack: () -> Unit) {
             }
 
             // ---- Insight
-            val best = result?.let { r -> listOfNotNull(r.wifi?.downMbps, r.mobile?.downMbps).maxOrNull() }
+            val best = result?.bestSingleDown
             val combined = result?.combinedDown
             val gain = if (best != null && best > 0.5 && combined != null) combined / best else null
             val msg = st.message
+            val only = result?.onlyLink
+            fun f(v: Double) = formatSpeed(v, unit).toString()
+            val onlyName = if (only == com.dualboost.app.core.LinkType.WIFI) "Wi-Fi" else "mobile data"
             val note: String = when {
                 msg != null -> msg
-                st.stage == TestStage.DONE && gain != null ->
+                st.running -> "Each link is tested on its own, then both at once. " +
+                    "A full test takes about 45 seconds and can use 50–150 MB of mobile data."
+                only != null && best != null && combined != null ->
+                    "Both at once gave ${f(combined)}, slower than $onlyName alone (${f(best)}). " +
+                        "This usually means 2.4 GHz Wi-Fi is interfering with 4G inside the phone, or both links share one connection.\n\n" +
+                        "So the boost now uses $onlyName only and keeps the other link as instant backup. It will never make you slower. " +
+                        "Use 5 GHz Wi-Fi if you can, then run the test again."
+                gain != null && gain >= 1.1 ->
                     "Using both links together is ${String.format(Locale.US, "%.1f", gain)}× your fastest single link. " +
                         "That's the most DualBoost can give busy apps and downloads."
+                gain != null ->
+                    "Both together were about the same as your fastest link this time. Networks vary from minute to minute: run the test again to confirm."
+                result?.problem != null -> result.problem
                 else -> "Each link is tested on its own, then both at once. " +
-                    "A full test takes about 40 seconds and can use 50–150 MB of mobile data."
+                    "A full test takes about 45 seconds and can use 50–150 MB of mobile data."
             }
             Spacer(Modifier.height(Db.s3))
             DbCard(Modifier.fillMaxWidth(), padding = 18.dp) {
-                Text(note, color = if (st.stage == TestStage.ERROR) c.mobile else c.muted, style = Db.small)
+                Text(note, color = if (st.stage == TestStage.ERROR) c.mobile else if (only != null && !st.running) c.ink else c.muted, style = Db.small)
+                val problem = result?.problem
+                if (problem != null && !st.running && note != problem) {
+                    Spacer(Modifier.height(Db.s2))
+                    Text(problem, color = c.mobile, style = Db.caption)
+                }
                 if (result != null && result.mobileBytes > 0 && !st.running) {
                     Spacer(Modifier.height(Db.s2))
                     Text("Mobile data used by the last test: ${formatBytes(result.mobileBytes)}", color = c.muted, style = Db.caption)
