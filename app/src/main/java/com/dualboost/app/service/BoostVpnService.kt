@@ -1,5 +1,6 @@
 package com.dualboost.app.service
 
+import com.dualboost.app.core.Diag
 import android.app.Notification
 import android.app.PendingIntent
 import android.content.Context
@@ -117,7 +118,7 @@ class BoostVpnService : VpnService() {
 
             val bal = Balancer(lm, { settings.current }, { capReached })
             balancer = bal
-            val rs = RelayServer(lm, bal) { n -> mobilePending.addAndGet(n) }
+            val rs = RelayServer(lm, bal, { n -> mobilePending.addAndGet(n) }, ::ownerOf)
             relay = rs
             rs.start()
 
@@ -132,9 +133,9 @@ class BoostVpnService : VpnService() {
                 it.copy(phase = Phase.ON, startedAt = System.currentTimeMillis(), error = null, peakMbps = 0.0)
             }
             publishLinks()
-            Log.i(TAG, "boost started (ipv6=$tunV6, relay port=${rs.port})")
+            Diag.i(TAG, "boost started (ipv6=$tunV6, relay port=${rs.port})")
         } catch (e: Exception) {
-            Log.e(TAG, "start failed", e)
+            Diag.e(TAG, "start failed", e)
             teardown()
             BoostState.update { it.copy(phase = Phase.OFF, error = e.message ?: "Could not start") }
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -226,9 +227,9 @@ class BoostVpnService : VpnService() {
             if (tun == null) return@execute
             try {
                 establishTunnel()
-                Log.i(TAG, "tunnel rebuilt")
+                Diag.i(TAG, "tunnel rebuilt")
             } catch (e: Exception) {
-                Log.e(TAG, "rebuild failed", e)
+                Diag.e(TAG, "rebuild failed", e)
                 BoostState.update { it.copy(error = e.message ?: "Could not apply the change") }
                 stopBoost(userRequested = false)
             }
@@ -241,6 +242,7 @@ class BoostVpnService : VpnService() {
     }
 
     private fun stopBoost(userRequested: Boolean) {
+        Diag.i(TAG, "boost stopping (${if (userRequested) "by user" else "automatically"})")
         if (userRequested) settings.wantRunning = false
         BoostState.update { it.copy(phase = Phase.STOPPING) }
         teardown()
@@ -300,6 +302,21 @@ class BoostVpnService : VpnService() {
         else -> LinkStatus.READY
     }
 
+    // ------------------------------------------------------------------ connection owner (per-app rules)
+
+    private val uidPackages = java.util.concurrent.ConcurrentHashMap<Int, String>()
+
+    /** Which app opened a connection, via Android's owner lookup (VPN apps may ask for their own tunnel). */
+    private fun ownerOf(udp: Boolean, src: java.net.InetSocketAddress, dst: java.net.InetSocketAddress): String? {
+        val s = settings.current
+        if (s.appRules.isEmpty() && !s.lowPingMode) return null // nothing depends on it
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+        val proto = if (udp) android.system.OsConstants.IPPROTO_UDP else android.system.OsConstants.IPPROTO_TCP
+        val uid = runCatching { cm.getConnectionOwnerUid(proto, src, dst) }.getOrDefault(android.os.Process.INVALID_UID)
+        if (uid < 0) return null
+        return uidPackages.getOrPut(uid) { packageManager.getPackagesForUid(uid)?.firstOrNull() ?: "" }.ifEmpty { null }
+    }
+
     // ------------------------------------------------------------------ health probes
 
     private val prober = Executors.newSingleThreadExecutor { r -> Thread(r, "boost-probe").apply { isDaemon = true } }
@@ -341,6 +358,7 @@ class BoostVpnService : VpnService() {
                 }
             }
             if (l.network != net) continue // network changed while probing
+            l.recordProbe(rtt)
             if (rtt > 0) {
                 l.rttMs = if (l.rttMs > 0) (l.rttMs * 2 + rtt) / 3 else rtt
                 l.probeFailures = 0
@@ -351,7 +369,7 @@ class BoostVpnService : VpnService() {
                 val moving = l.rxRate > 4_096
                 if (l.probeFailures >= 2 && !moving && l.healthy) {
                     l.healthy = false
-                    Log.w(TAG, "${l.type} failed health probes; avoiding it")
+                    Diag.w(TAG, "${l.type} failed health probes; avoiding it")
                     val other = lm.all.firstOrNull { it !== l && it.isGood }
                     if (other != null) relay?.closeFlows(l)
                     publishLinks()
@@ -377,17 +395,17 @@ class BoostVpnService : VpnService() {
             return
         }
         recoveries.addLast(now)
-        Log.w(TAG, "recovering: $reason")
+        Diag.w(TAG, "recovering: $reason")
         try {
             val lm = links ?: return
             val bal = balancer ?: return
             if (relay?.alive != true) {
                 relay?.stop()
-                relay = RelayServer(lm, bal) { n -> mobilePending.addAndGet(n) }.also { it.start() }
+                relay = RelayServer(lm, bal, { n -> mobilePending.addAndGet(n) }, ::ownerOf).also { it.start() }
             }
             establishTunnel()
         } catch (e: Exception) {
-            Log.e(TAG, "recovery failed", e)
+            Diag.e(TAG, "recovery failed", e)
             BoostState.update { it.copy(error = e.message ?: "Could not recover") }
             stopBoost(userRequested = false)
         }
@@ -466,6 +484,11 @@ class BoostVpnService : VpnService() {
                 upMbps = l.txRate * 8 / 1e6,
                 connections = l.flows.size,
                 sessionBytes = rx + tx - sessionStart[i],
+                rttMs = l.rttMs,
+                jitterMs = l.jitterMs(),
+                lossPercent = l.lossPercent(),
+                capacityMbps = l.capacity * 8 / 1e6,
+                healthy = l.healthy,
             )
         }
 
@@ -499,7 +522,8 @@ class BoostVpnService : VpnService() {
             return
         }
         if (tickCount % 3 == 0) watchTunnel()
-        if (tickCount % PROBE_EVERY_TICKS == 0) requestProbe()
+        val probeEvery = if (settings.current.lowPingMode) PROBE_EVERY_TICKS / 2 else PROBE_EVERY_TICKS
+        if (tickCount % probeEvery == 0) requestProbe()
         if (++tickCount % 2 == 0) {
             runCatching { DualBoostApp.notify(this, NOTIF_ID, buildNotification(BoostState.ui.value)) }
         }

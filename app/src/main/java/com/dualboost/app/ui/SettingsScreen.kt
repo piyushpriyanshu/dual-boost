@@ -38,6 +38,8 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenApps: () -> Unit,
     onOpenUpdates: () -> Unit,
+    onOpenDiagnostics: () -> Unit,
+    onOpenReport: () -> Unit,
     onAlwaysOn: () -> Unit,
     onBattery: () -> Unit,
     onDeveloper: () -> Unit,
@@ -137,10 +139,16 @@ fun SettingsScreen(
                 R.drawable.ic_restart, c.mobile, s.autoStart,
             ) { v -> onChange { it.copy(autoStart = v) } }
             RowDivider()
+            SwitchRow(
+                "Low-ping mode", "Games and calls stay on the link with the lowest ping",
+                R.drawable.ic_speed, c.purple, s.lowPingMode,
+            ) { v -> onChange { it.copy(lowPingMode = v) } }
+            RowDivider()
+            val ruled = s.appRules.count { it.value != com.dualboost.app.core.AppRule.BOTH } + s.excludedApps.size
             ChevronRow(
-                "Excluded apps", "These apps use your normal connection",
+                "App rules", "Both links, low ping, Wi-Fi only, mobile, or bypass per app",
                 R.drawable.ic_apps, c.warn,
-                value = if (s.excludedApps.isEmpty()) "None" else "${s.excludedApps.size}",
+                value = if (ruled == 0) "Default" else "$ruled set",
                 onClick = onOpenApps,
             )
         }
@@ -183,6 +191,20 @@ fun SettingsScreen(
             ChevronRow(
                 "Mobile data always active", "Developer option that keeps mobile data ready",
                 R.drawable.ic_mobile, c.mobile, onClick = onDeveloper,
+            )
+        }
+
+        // ---- Help
+        SectionHeader("Help")
+        SettingsGroup {
+            ChevronRow(
+                "Diagnostics", "Ping, signal and a plain answer to \"why is it slow?\"",
+                R.drawable.ic_info, c.wifi, onClick = onOpenDiagnostics,
+            )
+            RowDivider()
+            ChevronRow(
+                "Report a problem", "Sends a ready-filled report with logs to GitHub",
+                R.drawable.ic_bug, c.mobile, onClick = onOpenReport,
             )
         }
 

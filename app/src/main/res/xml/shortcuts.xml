@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_sc_power"
+        android:shortcutId="toggle"
+        android:shortcutLongLabel="@string/sc_toggle_long"
+        android:shortcutShortLabel="@string/sc_toggle">
+        <intent
+            android:action="com.dualboost.app.action.TOGGLE"
+            android:targetClass="com.dualboost.app.ui.MainActivity"
+            android:targetPackage="com.dualboost.app" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_sc_speed"
+        android:shortcutId="speedtest"
+        android:shortcutShortLabel="@string/sc_speed">
+        <intent
+            android:action="com.dualboost.app.action.SPEEDTEST"
+            android:targetClass="com.dualboost.app.ui.MainActivity"
+            android:targetPackage="com.dualboost.app" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_sc_download"
+        android:shortcutId="downloads"
+        android:shortcutShortLabel="@string/sc_downloads">
+        <intent
+            android:action="com.dualboost.app.action.DOWNLOADS"
+            android:targetClass="com.dualboost.app.ui.MainActivity"
+            android:targetPackage="com.dualboost.app" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_sc_diag"
+        android:shortcutId="diagnostics"
+        android:shortcutShortLabel="@string/sc_diag">
+        <intent
+            android:action="com.dualboost.app.action.DIAGNOSTICS"
+            android:targetClass="com.dualboost.app.ui.MainActivity"
+            android:targetPackage="com.dualboost.app" />
+    </shortcut>
+</shortcuts>

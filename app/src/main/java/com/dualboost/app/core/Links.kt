@@ -68,6 +68,24 @@ class Link(val type: LinkType) {
     @Volatile var probeFailures = 0
     /** Last measured connect time to the internet in ms (-1 = unknown). */
     @Volatile var rttMs = -1
+    /** Recent probe results: connect time in ms, or -1 for a failed probe (newest last). */
+    val probeHistory = ArrayDeque<Int>()
+
+    @Synchronized fun recordProbe(ms: Int) {
+        probeHistory.addLast(ms)
+        while (probeHistory.size > 12) probeHistory.removeFirst()
+    }
+
+    /** Average change between consecutive successful probes, ms (-1 = unknown). */
+    @Synchronized fun jitterMs(): Int {
+        val ok = probeHistory.filter { it > 0 }
+        if (ok.size < 3) return -1
+        return ok.zipWithNext { a, b -> kotlin.math.abs(a - b) }.average().toInt()
+    }
+
+    /** Share of recent probes that failed, 0..100 (-1 = unknown). */
+    @Synchronized fun lossPercent(): Int =
+        if (probeHistory.size < 3) -1 else probeHistory.count { it < 0 } * 100 / probeHistory.size
 
     val isUp: Boolean get() = network != null
 
@@ -96,6 +114,7 @@ class Link(val type: LinkType) {
         healthy = true
         probeFailures = 0
         rttMs = -1
+        synchronized(this) { probeHistory.clear() }
     }
 
     companion object {
@@ -140,7 +159,7 @@ class LinkMonitor(context: Context, private val onChange: () -> Unit) {
                 link.probeFailures = 0
                 cm.getNetworkCapabilities(network)?.let { applyCaps(link, it) }
                 cm.getLinkProperties(network)?.let { applyLp(link, it) }
-                Log.i(TAG, "${link.type} available: $network")
+                Diag.i(TAG, "${link.type} available: $network")
                 onChange()
             }
 
@@ -160,7 +179,7 @@ class LinkMonitor(context: Context, private val onChange: () -> Unit) {
                     link.network = null
                     link.validated = false
                     link.hasIpv6 = false
-                    Log.i(TAG, "${link.type} lost")
+                    Diag.i(TAG, "${link.type} lost")
                     onChange()
                 }
             }
@@ -169,7 +188,7 @@ class LinkMonitor(context: Context, private val onChange: () -> Unit) {
             cm.requestNetwork(req, cb)
             synchronized(callbacks) { callbacks += cb }
         } catch (e: Exception) {
-            Log.e(TAG, "requestNetwork failed for ${link.type}", e)
+            Diag.e(TAG, "requestNetwork failed for ${link.type}", e)
         }
     }
 

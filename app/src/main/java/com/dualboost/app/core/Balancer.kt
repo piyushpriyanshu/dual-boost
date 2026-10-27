@@ -24,11 +24,40 @@ class Balancer(
     private class Sticky(val type: LinkType, @Volatile var until: Long)
     private val sticky = ConcurrentHashMap<InetAddress, Sticky>()
 
-    fun order(dst: InetAddress?, port: Int, udp: Boolean): List<Link> {
+    private class AppPin(val type: LinkType, @Volatile var until: Long)
+    /** Low-ping apps stay on one link so game/call sessions never switch mid-way. */
+    private val appPins = ConcurrentHashMap<String, AppPin>()
+
+    /**
+     * Ordered link preference for a new connection.
+     * [app] is the package that opened it (null if unknown).
+     */
+    fun order(dst: InetAddress?, port: Int, udp: Boolean, app: String? = null): List<Link> {
         val now = System.currentTimeMillis()
         val s = settings()
         val up = links.all.filter { it.isUp }
+        val wifi = links.wifi
+        val mobile = links.mobile
+
+        // ---- per-app rules (strict ones apply even with a single link)
+        val rule = s.ruleFor(app)
+        when (rule) {
+            AppRule.WIFI_ONLY -> return up.filter { it === wifi }
+            AppRule.MOBILE -> {
+                // Mobile first, Wi-Fi only if mobile is unavailable or today's limit is reached.
+                return if (mobile.isUp && !mobileCapReached()) listOf(mobile) + up.filter { it === wifi }
+                else up.filter { it === wifi }
+            }
+            else -> {}
+        }
         if (up.size <= 1) return up
+
+        // ---- low ping: explicit/preset apps, plus real-time UDP (games, calls) when the mode is on
+        val realtimeUdp = s.lowPingMode && udp && port != 53 && port != 443
+        if (s.mode != BoostMode.BACKUP && (rule == AppRule.LOW_PING || realtimeUdp)) {
+            val first = lowPing(app, now)
+            if (first != null) return listOf(first) + up.filter { it !== first }
+        }
 
         // Prefer links with confirmed internet (Android-validated and passing our probe),
         // then validated ones, then anything that is up.
@@ -39,8 +68,6 @@ class Balancer(
             validated.isNotEmpty() -> validated
             else -> up
         }
-        val wifi = links.wifi
-        val mobile = links.mobile
 
         // Mobile data budget reached → mobile is last resort only.
         val capHit = mobileCapReached()
@@ -83,6 +110,32 @@ class Balancer(
         return if (decisions.incrementAndGet() % EXPLORE_EVERY == 0) (if (best === wifi) mobile else wifi) else best
     }
 
+    /**
+     * Lowest-ping healthy link. For a known app the choice is kept for 10 minutes (refreshed by use)
+     * unless that link stops being healthy, so a game or call never hops links mid-session.
+     */
+    private fun lowPing(app: String?, now: Long): Link? {
+        val wifi = links.wifi
+        val mobile = links.mobile
+        val capHit = mobileCapReached()
+        fun ok(l: Link) = l.isGood && !l.inPenalty(now) && (l !== mobile || !capHit)
+        if (app != null) {
+            appPins[app]?.let { pin ->
+                val l = if (pin.type == LinkType.WIFI) wifi else mobile
+                if (pin.until > now && ok(l)) { pin.until = now + APP_PIN_MS; return l }
+            }
+        }
+        val candidates = listOf(wifi, mobile).filter { ok(it) }
+        if (candidates.isEmpty()) return null
+        val best = candidates.minByOrNull { l ->
+            // Unknown ping sorts last; Wi-Fi wins ties within 15%.
+            val r = if (l.rttMs > 0) l.rttMs.toDouble() else 9_999.0
+            if (l === wifi) r / 1.15 else r
+        } ?: return null
+        if (app != null) appPins[app] = AppPin(best.type, now + APP_PIN_MS)
+        return best
+    }
+
     /** Lower measured latency wins; Wi-Fi when unknown or close. */
     private fun fastest(wifi: Link, mobile: Link, now: Long): Link {
         if (wifi.inPenalty(now) && !mobile.inPenalty(now)) return mobile
@@ -94,11 +147,12 @@ class Balancer(
     private fun expected(link: Link, now: Long): Double =
         link.capacity / (link.heavyFlows(now) + 1)
 
-    fun clear() = sticky.clear()
+    fun clear() { sticky.clear(); appPins.clear() }
 
     companion object {
         private const val STICKY_MS = 10 * 60_000L
         private const val MOBILE_BIAS = 0.9
         private const val EXPLORE_EVERY = 8
+        private const val APP_PIN_MS = 10 * 60_000L
     }
 }

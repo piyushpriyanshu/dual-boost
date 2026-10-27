@@ -60,6 +60,9 @@ fun HomeScreen(
     settings: com.dualboost.app.core.SettingsSnapshot,
     onToggle: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenSpeedTest: () -> Unit,
+    onOpenDownloads: () -> Unit,
+    onOpenDiagnostics: () -> Unit,
     onOpenDeveloperOptions: () -> Unit,
     onDismissError: () -> Unit,
     update: UpdateUi,
@@ -98,6 +101,14 @@ fun HomeScreen(
             Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(Db.s3)) {
                 LinkCard(Modifier.weight(1f).fillMaxHeight(), "Wi-Fi", R.drawable.ic_wifi, c.wifi, ui.wifi, idle.wifi, on)
                 LinkCard(Modifier.weight(1f).fillMaxHeight(), "Mobile data", R.drawable.ic_mobile, c.mobile, ui.mobile, idle.mobile, on)
+            }
+
+            // ---- Tools
+            Spacer(Modifier.height(Db.s3))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Db.s3)) {
+                ToolTile(Modifier.weight(1f), "Speed test", R.drawable.ic_speed, c.wifi, onOpenSpeedTest)
+                ToolTile(Modifier.weight(1f), "Downloads", R.drawable.ic_download, c.mobile, onOpenDownloads)
+                ToolTile(Modifier.weight(1f), "Diagnostics", R.drawable.ic_info, c.good, onOpenDiagnostics)
             }
 
             ProtectionCard(settings, ui, onOpenSettings)
@@ -443,6 +454,18 @@ private fun StatCell(
         if (footer != null) {
             Spacer(Modifier.height(Db.s2))
             footer()
+        }
+    }
+}
+
+@Composable
+private fun ToolTile(modifier: Modifier, label: String, @DrawableRes icon: Int, color: Color, onClick: () -> Unit) {
+    val c = Db.colors
+    DbCard(modifier, padding = Db.s4, onClick = onClick) {
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            IconTile(icon, color, size = 40.dp)
+            Spacer(Modifier.height(Db.s2))
+            Text(label, color = c.ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
         }
     }
 }

@@ -1,0 +1,97 @@
+diff --git a/src/hev-socks5-session-tcp.c b/src/hev-socks5-session-tcp.c
+index a0475ab..9f9724f 100644
+--- a/src/hev-socks5-session-tcp.c
++++ b/src/hev-socks5-session-tcp.c
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include <errno.h>
++#include <stdio.h>
+ #include <string.h>
+ 
+ #include <lwip/tcp.h>
+@@ -274,6 +275,17 @@ hev_socks5_session_tcp_construct (HevSocks5SessionTCP *self,
+     if (res < 0)
+         return -1;
+ 
++    {
++        HevConfigServer *srv = hev_config_get_socks5_server ();
++        if (srv->user && srv->pass) {
++            snprintf (self->auth_user, sizeof (self->auth_user), "%s:t:%u:%s",
++                      srv->user, (unsigned)pcb->remote_port,
++                      ipaddr_ntoa (&pcb->remote_ip));
++            hev_socks5_client_set_auth (HEV_SOCKS5_CLIENT (self),
++                                        self->auth_user, srv->pass);
++        }
++    }
++
+     LOG_D ("%p socks5 session tcp construct", self);
+ 
+     HEV_OBJECT (self)->klass = HEV_SOCKS5_SESSION_TCP_TYPE;
+diff --git a/src/hev-socks5-session-tcp.h b/src/hev-socks5-session-tcp.h
+index 12ad520..2faf5b2 100644
+--- a/src/hev-socks5-session-tcp.h
++++ b/src/hev-socks5-session-tcp.h
+@@ -33,6 +33,8 @@ struct _HevSocks5SessionTCP
+     HevTaskMutex *mutex;
+     HevRingBuffer *buffer;
+     int pcb_eof;
++    /* DualBoost: per-session SOCKS user "<user>:t:<src-port>:<src-ip>" (owner-app lookup). */
++    char auth_user[192];
+ };
+ 
+ struct _HevSocks5SessionTCPClass
+diff --git a/src/hev-socks5-session-udp.c b/src/hev-socks5-session-udp.c
+index 9a283f2..f28d3f1 100644
+--- a/src/hev-socks5-session-udp.c
++++ b/src/hev-socks5-session-udp.c
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include <errno.h>
++#include <stdio.h>
+ #include <string.h>
+ 
+ #include <lwip/udp.h>
+@@ -340,6 +341,14 @@ hev_socks5_session_udp_construct (HevSocks5SessionUDP *self,
+     if (res < 0)
+         return -1;
+ 
++    if (srv->user && srv->pass) {
++        snprintf (self->auth_user, sizeof (self->auth_user), "%s:u:%u:%s",
++                  srv->user, (unsigned)pcb->remote_port,
++                  ipaddr_ntoa (&pcb->remote_ip));
++        hev_socks5_client_set_auth (HEV_SOCKS5_CLIENT (self), self->auth_user,
++                                    srv->pass);
++    }
++
+     LOG_D ("%p socks5 session udp construct", self);
+ 
+     HEV_OBJECT (self)->klass = HEV_SOCKS5_SESSION_UDP_TYPE;
+diff --git a/src/hev-socks5-session-udp.h b/src/hev-socks5-session-udp.h
+index 069f59e..6354829 100644
+--- a/src/hev-socks5-session-udp.h
++++ b/src/hev-socks5-session-udp.h
+@@ -33,6 +33,8 @@ struct _HevSocks5SessionUDP
+     int frames;
+     int addr;
+     int port;
++    /* DualBoost: per-session SOCKS user "<user>:u:<src-port>:<src-ip>" (owner-app lookup). */
++    char auth_user[192];
+ };
+ 
+ struct _HevSocks5SessionUDPClass
+diff --git a/src/hev-socks5-session.c b/src/hev-socks5-session.c
+index e946fa6..6f12749 100644
+--- a/src/hev-socks5-session.c
++++ b/src/hev-socks5-session.c
+@@ -34,7 +34,8 @@ hev_socks5_session_run (HevSocks5Session *self)
+         return;
+     }
+ 
+-    if (srv->user && srv->pass) {
++    /* DualBoost: keep a per-session user if the session set one. */
++    if (srv->user && srv->pass && !HEV_SOCKS5_CLIENT (self)->auth.user) {
+         hev_socks5_client_set_auth (HEV_SOCKS5_CLIENT (self), srv->user,
+                                     srv->pass);
+         LOG_D ("%p socks5 client auth %s:%s", self, srv->user, srv->pass);

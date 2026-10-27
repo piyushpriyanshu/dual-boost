@@ -37,6 +37,8 @@ class RelayServer(
     private val links: LinkMonitor,
     private val balancer: Balancer,
     private val onMobileBytes: (Long) -> Unit,
+    /** Finds the app that owns a connection (null if unknown). Called only when rules need it. */
+    private val ownerOf: ((udp: Boolean, src: InetSocketAddress, dst: InetSocketAddress) -> String?)? = null,
 ) {
     val username: String = token()
     val password: String = token()
@@ -106,8 +108,12 @@ class RelayServer(
             if (input.readUnsignedByte() != 1) return
             val user = String(ByteArray(input.readUnsignedByte()).also { input.readFully(it) })
             val pass = String(ByteArray(input.readUnsignedByte()).also { input.readFully(it) })
-            if (user != username || pass != password) { output.write(byteArrayOf(1, 1)); return }
+            // The engine sends "<user>:<t|u>:<source port>:<source ip>" so we can tell which app it is.
+            if ((user != username && !user.startsWith("$username:")) || pass != password) {
+                output.write(byteArrayOf(1, 1)); return
+            }
             output.write(byteArrayOf(1, 0))
+            val source = parseSource(user.removePrefix(username))
 
             // Request: VER CMD RSV ATYP ADDR PORT
             if (input.readUnsignedByte() != 5) return
@@ -116,17 +122,35 @@ class RelayServer(
             val target = readAddress(input) ?: run { reply(output, 8); return }
 
             when (cmd) {
-                1 -> handleConnect(client, input, output, target)
-                5 -> handleUdp(client, input, output)
+                1 -> handleConnect(client, input, output, target, source)
+                5 -> handleUdp(client, input, output, source)
                 else -> reply(output, 7)
             }
         } catch (_: IOException) {
         } catch (e: Exception) {
-            Log.w(TAG, "relay error", e)
+            Diag.w(TAG, "relay error", e)
         } finally {
             runCatching { client.close() }
             openSockets -= client
         }
+    }
+
+    /** ":t:<port>:<ip>" → the app-side address of the connection inside the VPN. */
+    private fun parseSource(tag: String): InetSocketAddress? {
+        if (!tag.startsWith(":")) return null
+        val parts = tag.removePrefix(":").split(':', limit = 3)
+        if (parts.size < 3) return null
+        val port = parts[1].toIntOrNull() ?: return null
+        return runCatching {
+            if (!android.net.InetAddresses.isNumericAddress(parts[2])) return null
+            InetSocketAddress(android.net.InetAddresses.parseNumericAddress(parts[2]), port)
+        }.getOrNull()
+    }
+
+    private fun appOf(udp: Boolean, src: InetSocketAddress?, dst: InetAddress?, port: Int): String? {
+        val f = ownerOf ?: return null
+        if (src == null || dst == null) return null
+        return runCatching { f(udp, src, InetSocketAddress(dst, port)) }.getOrNull()
     }
 
     /** [wireLen] = bytes of ATYP + ADDR + PORT as they appeared on the wire. */
@@ -152,8 +176,9 @@ class RelayServer(
 
     // ------------------------------------------------------------------ TCP
 
-    private fun handleConnect(client: Socket, cin: InputStream, cout: OutputStream, t: Target) {
-        val order = balancer.order(t.addr, t.port, udp = false)
+    private fun handleConnect(client: Socket, cin: InputStream, cout: OutputStream, t: Target, source: InetSocketAddress?) {
+        val app = appOf(false, source, t.addr, t.port)
+        val order = balancer.order(t.addr, t.port, udp = false, app = app)
         if (order.isEmpty()) { reply(cout, 3); return }
         val won = connectRaced(order, t) ?: run { reply(cout, 4); return }
         relayTcp(client, cin, cout, won.sock, won.link)
@@ -294,11 +319,13 @@ class RelayServer(
     //
     // Frame: [len_hi len_lo][hdrlen][ATYP ADDR PORT][payload], hdrlen = 3 + addr-length.
 
-    private fun handleUdp(client: Socket, cin: DataInputStream, cout: OutputStream) {
+    private fun handleUdp(client: Socket, cin: DataInputStream, cout: OutputStream, source: InetSocketAddress?) {
         reply(cout, 0)
         client.soTimeout = 0
 
         var legs: List<UdpLeg> = emptyList()
+        var app: String? = null
+        var appResolved = false
         try {
             val head = ByteArray(3)
             val payload = ByteArray(65_535)
@@ -314,7 +341,10 @@ class RelayServer(
                 legs = legs.filter { !it.closed }
                 // DNS goes out over both links at once; the first answer wins (apps ignore the duplicate).
                 val dual = target.port == 53
-                if (legs.isEmpty()) legs = openUdpLegs(dst, target.port, cout, dual, emptySet())
+                if (legs.isEmpty()) {
+                    if (!appResolved) { app = appOf(true, source, dst, target.port); appResolved = true }
+                    legs = openUdpLegs(dst, target.port, cout, dual, emptySet(), app)
+                }
                 var sent = false
                 for (leg in legs) {
                     if (leg.send(payload, dataLen, dst, target.port)) sent = true else leg.close()
@@ -322,7 +352,7 @@ class RelayServer(
                 if (!sent) {
                     // The link(s) could not send (e.g. IPv6 on a v4-only network): move to another.
                     val tried = legs.map { it.flow.link }.toSet()
-                    legs = openUdpLegs(dst, target.port, cout, dual, tried)
+                    legs = openUdpLegs(dst, target.port, cout, dual, tried, app)
                     for (leg in legs) leg.send(payload, dataLen, dst, target.port)
                 }
             }
@@ -332,9 +362,11 @@ class RelayServer(
         }
     }
 
-    private fun openUdpLegs(dst: InetAddress, port: Int, cout: OutputStream, dual: Boolean, exclude: Set<Link>): List<UdpLeg> {
+    private fun openUdpLegs(
+        dst: InetAddress, port: Int, cout: OutputStream, dual: Boolean, exclude: Set<Link>, app: String?,
+    ): List<UdpLeg> {
         val out = ArrayList<UdpLeg>(2)
-        for (link in balancer.order(dst, port, udp = true)) {
+        for (link in balancer.order(dst, port, udp = true, app = app)) {
             if (link in exclude) continue
             val leg = openUdpLeg(link, cout) ?: continue
             out += leg
