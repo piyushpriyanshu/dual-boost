@@ -133,8 +133,9 @@ fun SpeedTestScreen(onBack: () -> Unit) {
             val best = result?.let { r -> listOfNotNull(r.wifi?.downMbps, r.mobile?.downMbps).maxOrNull() }
             val combined = result?.combinedDown
             val gain = if (best != null && best > 0.5 && combined != null) combined / best else null
-            val note = when {
-                st.message != null -> st.message
+            val msg = st.message
+            val note: String = when {
+                msg != null -> msg
                 st.stage == TestStage.DONE && gain != null ->
                     "Using both links together is ${String.format(Locale.US, "%.1f", gain)}× your fastest single link. " +
                         "That's the most DualBoost can give busy apps and downloads."
