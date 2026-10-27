@@ -101,7 +101,12 @@ object SpeedTest {
         Server("Tele2", "http://speedtest.tele2.net/upload.php", "http://speedtest.tele2.net/upload.php"),
     )
 
-    private const val UP_CHUNK = 8_000_000
+    /** Upload request size adapts per stream so each request lasts about [UP_TARGET_MS]. */
+    private const val UP_MIN = 256 * 1024
+    private const val UP_MAX = 32 * 1024 * 1024
+    private const val UP_TARGET_MS = 1_200L
+    /** Upload keeps going (up to this) until every link has confirmed requests to measure. */
+    private const val UP_MAX_MS = 12_000L
     private const val STREAMS_DOWN = 6
     private const val STREAMS_UP = 4
     private const val DOWN_MS = 7_000L
@@ -432,6 +437,28 @@ object SpeedTest {
     private class StreamStats {
         val errors = AtomicInteger()
         @Volatile var why: String? = null
+        /** Upload requests the server confirmed: [stream, startMs, endMs, bytes]. */
+        val confirmed = java.util.concurrent.ConcurrentLinkedQueue<LongArray>()
+    }
+
+    /**
+     * Upload speed from server-confirmed requests only. Bytes "written" on the phone sit in send
+     * buffers (several MB per connection), so counting them gives random results; a request
+     * counts when the server has answered, i.e. received all of it. Per stream:
+     * bytes / time of its confirmed requests (dropping the first, which includes connection
+     * setup, when there are more); the link's speed is the sum over its parallel streams.
+     */
+    private fun uploadMbps(st: StreamStats): Double? {
+        val byStream = st.confirmed.groupBy { it[0] }
+        if (byStream.isEmpty()) return null
+        var mbps = 0.0
+        for ((_, reqs) in byStream) {
+            val use = reqs.sortedBy { it[1] }.let { if (it.size > 1) it.drop(1) else it }
+            val bytes = use.sumOf { it[3] }
+            val ms = use.sumOf { (it[2] - it[1]).coerceAtLeast(1) }
+            mbps += bytes * 8.0 / (ms / 1000.0) / 1e6
+        }
+        return mbps
     }
 
     /** Runs streams on every (network, server) pair at the same time; returns one result per pair. */
@@ -443,9 +470,9 @@ object SpeedTest {
         val stop = AtomicBoolean(false)
         val conns = java.util.concurrent.ConcurrentHashMap.newKeySet<HttpURLConnection>()
         val done = CountDownLatch(targets.size * streams)
-        for ((i, t) in targets.withIndex()) repeat(streams) {
+        for ((i, t) in targets.withIndex()) repeat(streams) { k ->
             Thread({
-                try { stream(t.first, t.second, download, counters[i], stats[i], stop, conns) } finally { done.countDown() }
+                try { stream(t.first, t.second, download, k, counters[i], stats[i], stop, conns) } finally { done.countDown() }
             }, "st-$i").apply { isDaemon = true; start() }
         }
         val t0 = System.currentTimeMillis()
@@ -467,7 +494,11 @@ object SpeedTest {
                     _ui.value = _ui.value.copy(liveMbps = live)
                     lastSum = sum; lastAt = now
                 }
-                if (now - t0 >= duration) break
+                if (now - t0 >= duration) {
+                    // Upload: wait (up to UP_MAX_MS) until every link has at least two confirmed requests.
+                    val enough = download || stats.all { s -> s.confirmed.size >= 2 }
+                    if (enough || now - t0 >= UP_MAX_MS) break
+                }
                 // Every stream gave up (all refused): no point waiting out the clock.
                 if (done.count == 0L) break
             }
@@ -479,23 +510,28 @@ object SpeedTest {
         done.await(3, TimeUnit.SECONDS)
         val secs = ((end - (if (warmAt > 0) warmAt else t0)).coerceAtLeast(1)) / 1000.0
         return targets.indices.map { i ->
-            val bytes = counters[i].get() - warm[i]
-            val ok = warmAt > 0 && bytes > 0
-            Measure(if (ok) bytes * 8.0 / secs / 1e6 else 0.0, counters[i].get(), ok, stats[i].errors.get(), stats[i].why)
+            if (download) {
+                val bytes = counters[i].get() - warm[i]
+                val ok = warmAt > 0 && bytes > 0
+                Measure(if (ok) bytes * 8.0 / secs / 1e6 else 0.0, counters[i].get(), ok, stats[i].errors.get(), stats[i].why)
+            } else {
+                val up = uploadMbps(stats[i])
+                Measure(up ?: 0.0, counters[i].get(), up != null && up > 0, stats[i].errors.get(), stats[i].why)
+            }
         }
     }
 
     /** One stream: repeats requests until told to stop. A refused request is an error, never data. */
     private fun stream(
-        net: Network, srv: Server, download: Boolean, counter: AtomicLong, st: StreamStats, stop: AtomicBoolean,
+        net: Network, srv: Server, download: Boolean, index: Int, counter: AtomicLong, st: StreamStats, stop: AtomicBoolean,
         conns: MutableSet<HttpURLConnection>,
     ) {
         val buf = ByteArray(64 * 1024)
         var failures = 0
+        var chunk = UP_MIN
         while (!stop.get() && failures < 3) {
             val c = try { open(net, srv, srv.url) } catch (e: IOException) { failures++; continue }
             conns += c
-            var sentNow = 0L
             try {
                 c.connectTimeout = 5_000
                 c.readTimeout = 8_000
@@ -512,29 +548,36 @@ object SpeedTest {
                 } else {
                     c.requestMethod = "POST"
                     c.doOutput = true
-                    c.setFixedLengthStreamingMode(UP_CHUNK)
+                    val size = chunk
+                    c.setFixedLengthStreamingMode(size)
                     c.setRequestProperty("Content-Type", "application/octet-stream")
+                    val t0 = System.currentTimeMillis()
                     c.outputStream.use { out ->
                         var sent = 0
-                        while (sent < UP_CHUNK && !stop.get()) {
-                            val n = minOf(buf.size, UP_CHUNK - sent)
+                        while (sent < size && !stop.get()) {
+                            val n = minOf(buf.size, size - sent)
                             out.write(buf, 0, n)
                             sent += n
-                            sentNow += n
-                            counter.addAndGet(n.toLong())
+                            counter.addAndGet(n.toLong()) // data used (and the live readout)
                         }
                     }
                     if (!stop.get()) {
+                        // The answer arrives only after the server received every byte.
                         val code = c.responseCode
                         if (code !in 200..299) throw IOException("refused (HTTP $code)")
                         runCatching { c.inputStream.use { it.readBytes() } }
+                        val t1 = System.currentTimeMillis()
+                        if (!stop.get()) {
+                            st.confirmed += longArrayOf(index.toLong(), t0, t1, size.toLong())
+                            // Aim for ~1.2 s per request: long enough to be accurate, short enough to finish in time.
+                            val took = (t1 - t0).coerceAtLeast(1)
+                            chunk = (size.toLong() * UP_TARGET_MS / took).coerceIn(UP_MIN.toLong(), UP_MAX.toLong()).toInt()
+                        }
                     }
                 }
                 failures = 0
             } catch (e: IOException) {
                 if (!stop.get()) {
-                    // A refused or broken upload was thrown away by the server: it must not count as speed.
-                    if (!download && sentNow > 0) counter.addAndGet(-sentNow)
                     failures++
                     st.errors.incrementAndGet()
                     st.why = e.message?.takeIf { it.startsWith("refused") } ?: "connection error"
