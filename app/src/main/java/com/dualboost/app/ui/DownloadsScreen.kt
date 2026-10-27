@@ -138,13 +138,23 @@ fun DownloadsScreen(
         if (active.isNotEmpty()) {
             SectionHeader("In progress")
             active.forEach { d ->
-                ActiveCard(d) { DownloadService.cancel(context, d.id) }
+                ActiveCard(d, onPause = { DownloadService.pause(context, d.id) }) { DownloadService.cancel(context, d.id) }
+                Spacer(Modifier.height(Db.s3))
+            }
+        }
+
+        // ---- Paused (by you, by an error, or because the app was closed): progress is kept
+        val paused = items.filter { it.status == DlStatus.PAUSED }
+        if (paused.isNotEmpty()) {
+            SectionHeader("Paused")
+            paused.forEach { d ->
+                PausedCard(d, onResume = { DownloadService.resume(context, d.id, d.url) }) { Downloads.discard(context, d.id) }
                 Spacer(Modifier.height(Db.s3))
             }
         }
 
         // ---- Recent
-        val recent = items.filter { !it.active }
+        val recent = items.filter { !it.active && it.status != DlStatus.PAUSED }
         if (recent.isNotEmpty()) {
             SectionHeader("Recent")
             SettingsGroup {
@@ -170,7 +180,18 @@ fun DownloadsScreen(
                 SecondaryButton("Clear list") { Downloads.clearHistory(context) }
             }
         }
-        if (active.isEmpty() && recent.isEmpty()) {
+        // ---- Other download managers
+        SectionHeader("Using 1DM+, ADM or another download manager?")
+        DbCard(Modifier.fillMaxWidth(), padding = 18.dp) {
+            Text(
+                "They get the combined speed too: keep the boost on (Start boost on the home screen) and set the app to " +
+                    "8–16 connections (threads) per download in its download settings. " +
+                    "Don't set that app to Bypass in App rules.",
+                color = c.muted, style = Db.small,
+            )
+        }
+
+        if (active.isEmpty() && recent.isEmpty() && paused.isEmpty()) {
             Spacer(Modifier.height(Db.s3))
             DbCard(Modifier.fillMaxWidth(), padding = 18.dp) {
                 Text(
@@ -209,7 +230,7 @@ private fun SplitProgress(d: DownloadUi) {
 }
 
 @Composable
-private fun ActiveCard(d: DownloadUi, onCancel: () -> Unit) {
+private fun ActiveCard(d: DownloadUi, onPause: () -> Unit, onCancel: () -> Unit) {
     val c = Db.colors
     val unit = LocalSpeedUnit.current
     DbCard(Modifier.fillMaxWidth(), padding = 18.dp) {
@@ -221,14 +242,14 @@ private fun ActiveCard(d: DownloadUi, onCancel: () -> Unit) {
                 Text(
                     when {
                         d.status == DlStatus.PREPARING -> "Connecting…"
-                        d.size > 0 -> "${formatBytes(d.done)} of ${formatBytes(d.size)} · ${(d.fraction * 100).toInt()}%"
+                        d.status == DlStatus.WAITING -> "Waiting for internet… progress is saved"
+                        d.size > 0 -> "${formatBytes(d.done)} of ${formatBytes(d.size)} · ${(d.fraction * 100).toInt()}%" +
+                            (if (d.etaSec >= 0) " · ${DownloadService.eta(d.etaSec)} left" else "")
                         else -> formatBytes(d.done)
                     },
                     color = c.muted, style = Db.small,
                 )
             }
-            Spacer(Modifier.width(Db.s3))
-            SmallPill("Cancel", filled = false, onClick = onCancel)
         }
         Spacer(Modifier.height(14.dp))
         SplitProgress(d)
@@ -242,6 +263,46 @@ private fun ActiveCard(d: DownloadUi, onCancel: () -> Unit) {
                 LegendItem(c.mobile, formatSpeed(d.mobileMbps, unit).toString())
             } else if (d.status == DlStatus.DOWNLOADING) {
                 Text("This server allows one connection only", color = c.muted, style = Db.caption)
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth()) {
+            if (d.split) {
+                Box(Modifier.weight(1f)) { SecondaryButton("Pause", onClick = onPause) }
+                Spacer(Modifier.width(Db.s3))
+            }
+            Box(Modifier.weight(1f)) { SecondaryButton("Cancel", onClick = onCancel) }
+        }
+    }
+}
+
+@Composable
+private fun PausedCard(d: DownloadUi, onResume: () -> Unit, onDelete: () -> Unit) {
+    val c = Db.colors
+    DbCard(Modifier.fillMaxWidth(), padding = 18.dp) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconTile(R.drawable.ic_download, if (d.error != null) c.warn else c.muted, size = 36.dp, corner = 11.dp)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(d.name, color = c.ink, style = Db.rowTitle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    if (d.size > 0) "${formatBytes(d.done)} of ${formatBytes(d.size)} · ${(d.fraction * 100).toInt()}%" else formatBytes(d.done),
+                    color = c.muted, style = Db.small,
+                )
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        SplitProgress(d)
+        d.error?.let {
+            Spacer(Modifier.height(10.dp))
+            Text(it, color = c.muted, style = Db.caption)
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth()) {
+            Box(Modifier.weight(1f)) { SecondaryButton("Delete", onClick = onDelete) }
+            Spacer(Modifier.width(Db.s3))
+            Box(Modifier.weight(1f)) {
+                MainButton("Resume", R.drawable.ic_download, c.wifi, Modifier.fillMaxWidth().height(52.dp), onClick = onResume)
             }
         }
     }

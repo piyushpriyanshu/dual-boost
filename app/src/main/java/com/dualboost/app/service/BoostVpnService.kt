@@ -28,6 +28,7 @@ import com.dualboost.app.core.LinkStatus
 import com.dualboost.app.core.LinkUi
 import com.dualboost.app.core.Phase
 import com.dualboost.app.core.RelayServer
+import com.dualboost.app.core.SpeedTest
 import com.dualboost.app.core.TunnelNative
 import com.dualboost.app.ui.MainActivity
 import com.dualboost.app.ui.formatSpeed
@@ -116,6 +117,13 @@ class BoostVpnService : VpnService() {
                 throw IllegalStateException("No internet connection. Turn on Wi-Fi or mobile data.")
             }
 
+            // Start from each link's real speed (last speed test, if recent) instead of a guess, so the
+            // very first burst of connections (e.g. 1DM+ opening 16 at once) is already split correctly.
+            SpeedTest.lastResult(this)?.takeIf { System.currentTimeMillis() - it.at < 7 * 86_400_000L }?.let { r ->
+                r.wifi?.downMbps?.takeIf { it > 0.5 }?.let { lm.wifi.capacity = it * 1e6 / 8 }
+                r.mobile?.downMbps?.takeIf { it > 0.5 }?.let { lm.mobile.capacity = it * 1e6 / 8 }
+                Diag.i(TAG, "seeded link speeds from speed test: ${SpeedTest.summary(r)}")
+            }
             val bal = Balancer(lm, { settings.current }, { capReached })
             balancer = bal
             val rs = RelayServer(lm, bal, { n -> mobilePending.addAndGet(n) }, ::ownerOf)

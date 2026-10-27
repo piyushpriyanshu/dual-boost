@@ -43,10 +43,16 @@ class DownloadService : Service() {
                 if (running.get() == 0) stopSelf()
                 return START_NOT_STICKY
             }
-            ACTION_START -> {
+            ACTION_PAUSE -> {
+                Downloads.pause(intent.getLongExtra(EXTRA_ID, 0))
+                if (running.get() == 0) stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_START, ACTION_RESUME -> {
                 val url = intent.getStringExtra(EXTRA_URL)
+                val resumeId = intent.getLongExtra(EXTRA_ID, 0).takeIf { intent.action == ACTION_RESUME && it != 0L }
                 goForeground()
-                if (url != null) launch(url)
+                if (url != null || resumeId != null) launch(url, resumeId)
             }
         }
         if (running.get() == 0) stopSelf()
@@ -70,13 +76,14 @@ class DownloadService : Service() {
     private fun linkMonitor(): LinkMonitor =
         links ?: LinkMonitor(this) {}.also { it.start(); links = it }
 
-    private fun launch(url: String) {
+    private fun launch(url: String?, resumeId: Long?) {
+        if (resumeId != null && Downloads.isRunning(resumeId)) return
         running.incrementAndGet()
         val lm = linkMonitor()
         Thread({
             try {
-                val result = Downloads.run(applicationContext, url, lm) { ui -> notifyProgress(ui) }
-                notifyFinished(result)
+                val result = Downloads.run(applicationContext, url, resumeId, lm) { ui -> notifyProgress(ui) }
+                if (result != null) notifyFinished(result)
             } finally {
                 if (running.decrementAndGet() == 0) {
                     synchronized(this) { links?.stop(); links = null }
@@ -110,11 +117,14 @@ class DownloadService : Service() {
             this, ui.id.toInt(), Intent(this, DownloadService::class.java).setAction(ACTION_CANCEL).putExtra(EXTRA_ID, ui.id),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val text = if (ui.status == DlStatus.PREPARING) "Connecting…" else buildString {
+        val text = if (ui.status == DlStatus.PREPARING) "Connecting…"
+        else if (ui.status == DlStatus.WAITING) "Waiting for internet… progress is saved"
+        else buildString {
             append(formatBytes(ui.done))
             if (ui.size > 0) append(" of ${formatBytes(ui.size)}")
             append(" · ${formatSpeed(ui.totalMbps, unit)}")
             if (ui.split) append(" (Wi-Fi ${formatSpeed(ui.wifiMbps, unit).value} · Mobile ${formatSpeed(ui.mobileMbps, unit).value})")
+            if (ui.etaSec >= 0) append(" · ${eta(ui.etaSec)} left")
         }
         val n = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_download)
@@ -125,6 +135,13 @@ class DownloadService : Service() {
             .setOngoing(true).setOnlyAlertOnce(true).setSilent(true)
             .setColor(ContextCompat.getColor(this, R.color.accent))
             .setContentIntent(openApp(this))
+            .apply {
+                if (ui.split) addAction(0, "Pause", PendingIntent.getService(
+                    this@DownloadService, ui.id.toInt() + 7,
+                    Intent(this@DownloadService, DownloadService::class.java).setAction(ACTION_PAUSE).putExtra(EXTRA_ID, ui.id),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                ))
+            }
             .addAction(0, "Cancel", cancel)
             .build()
         // The first active download shares the foreground notification; others get their own.
@@ -136,6 +153,7 @@ class DownloadService : Service() {
         lastNotify.remove(ui.id)
         getSystemService(NotificationManager::class.java).cancel(ui.id.toInt())
         if (ui.status == DlStatus.CANCELLED) return
+        if (ui.status == DlStatus.PAUSED && ui.error == null) return // paused by the user
         val ok = ui.status == DlStatus.DONE
         val tap = if (ok && ui.uri != null) PendingIntent.getActivity(
             this, ui.id.toInt(),
@@ -146,7 +164,11 @@ class DownloadService : Service() {
         val unit = BoostSettings.get(this).current.speedUnit
         val n = NotificationCompat.Builder(this, DONE_CHANNEL)
             .setSmallIcon(R.drawable.ic_download)
-            .setContentTitle(if (ok) ui.name else "Download failed: ${ui.name}")
+            .setContentTitle(when {
+                ok -> ui.name
+                ui.status == DlStatus.PAUSED -> "Download paused: ${ui.name}"
+                else -> "Download failed: ${ui.name}"
+            })
             .setContentText(
                 if (ok) "${formatBytes(ui.done)} · average ${formatSpeed(ui.avgMbps, unit)} · tap to open"
                 else ui.error ?: "Tap to see details"
@@ -161,6 +183,8 @@ class DownloadService : Service() {
     companion object {
         const val ACTION_START = "com.dualboost.app.download.START"
         const val ACTION_CANCEL = "com.dualboost.app.download.CANCEL"
+        const val ACTION_PAUSE = "com.dualboost.app.download.PAUSE"
+        const val ACTION_RESUME = "com.dualboost.app.download.RESUME"
         const val EXTRA_URL = "url"
         const val EXTRA_ID = "id"
         private const val CHANNEL = "downloads"
@@ -171,6 +195,24 @@ class DownloadService : Service() {
             ContextCompat.startForegroundService(
                 context, Intent(context, DownloadService::class.java).setAction(ACTION_START).putExtra(EXTRA_URL, url),
             )
+        }
+
+        fun resume(context: Context, id: Long, url: String) {
+            ContextCompat.startForegroundService(
+                context, Intent(context, DownloadService::class.java).setAction(ACTION_RESUME).putExtra(EXTRA_ID, id).putExtra(EXTRA_URL, url),
+            )
+        }
+
+        fun pause(context: Context, id: Long) {
+            runCatching {
+                context.startService(Intent(context, DownloadService::class.java).setAction(ACTION_PAUSE).putExtra(EXTRA_ID, id))
+            }
+        }
+
+        fun eta(sec: Long): String = when {
+            sec < 60 -> "${sec}s"
+            sec < 3600 -> "${sec / 60} min"
+            else -> "${sec / 3600} h ${(sec % 3600) / 60} min"
         }
 
         fun cancel(context: Context, id: Long) {
