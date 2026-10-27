@@ -99,7 +99,12 @@ class BoostWidget : AppWidgetProvider() {
             })
             v.setInt(R.id.widget_button, "setBackgroundResource",
                 if (stopMode) R.drawable.widget_pill_orange else R.drawable.widget_pill_blue)
-            v.setOnClickPendingIntent(R.id.widget_button, toggleIntent(context, on))
+            // While starting or stopping, a tap must never fire the opposite action: it opens the app instead.
+            val busyTap = PendingIntent.getActivity(
+                context, 14, Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            v.setOnClickPendingIntent(R.id.widget_button, if (busy) busyTap else toggleIntent(context, on))
             v.setOnClickPendingIntent(R.id.widget_root, PendingIntent.getActivity(
                 context, 10, Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,

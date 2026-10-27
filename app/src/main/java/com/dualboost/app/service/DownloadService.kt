@@ -10,7 +10,9 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -24,6 +26,7 @@ import com.dualboost.app.core.LinkMonitor
 import com.dualboost.app.ui.MainActivity
 import com.dualboost.app.ui.formatBytes
 import com.dualboost.app.ui.formatSpeed
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Runs boosted downloads in the foreground so they continue when the app is in the background. */
@@ -31,32 +34,43 @@ class DownloadService : Service() {
 
     private var links: LinkMonitor? = null
     private val running = AtomicInteger()
-    private val lastNotify = HashMap<Long, Long>()
+    private val lastNotify = ConcurrentHashMap<Long, Long>()
+    /** Which notification id each download is currently shown under, so a move never leaves a stale one. */
+    private val shownAs = ConcurrentHashMap<Long, Int>()
+    private val main = Handler(Looper.getMainLooper())
+    @Volatile private var lastStartId = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
         createChannels(this)
         when (intent?.action) {
-            ACTION_CANCEL -> {
-                Downloads.cancel(intent.getLongExtra(EXTRA_ID, 0))
-                if (running.get() == 0) stopSelf()
-                return START_NOT_STICKY
-            }
-            ACTION_PAUSE -> {
-                Downloads.pause(intent.getLongExtra(EXTRA_ID, 0))
-                if (running.get() == 0) stopSelf()
-                return START_NOT_STICKY
-            }
+            ACTION_CANCEL -> Downloads.cancel(intent.getLongExtra(EXTRA_ID, 0))
+            ACTION_PAUSE -> Downloads.pause(intent.getLongExtra(EXTRA_ID, 0))
             ACTION_START, ACTION_RESUME -> {
                 val url = intent.getStringExtra(EXTRA_URL)
                 val resumeId = intent.getLongExtra(EXTRA_ID, 0).takeIf { intent.action == ACTION_RESUME && it != 0L }
+                // startForegroundService() requires startForeground() on every such start.
                 goForeground()
                 if (url != null || resumeId != null) launch(url, resumeId)
             }
         }
-        if (running.get() == 0) stopSelf()
+        maybeStop()
         return START_NOT_STICKY
+    }
+
+    /**
+     * Ends the service only when nothing is running, on the main thread (same thread as onStartCommand),
+     * and only if no newer start arrived meanwhile: stopSelfResult(lastStartId) refuses otherwise.
+     */
+    private fun maybeStop() {
+        main.post {
+            if (running.get() != 0) return@post
+            synchronized(this) { links?.stop(); links = null }
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            stopSelfResult(lastStartId)
+        }
     }
 
     private fun goForeground() {
@@ -85,18 +99,15 @@ class DownloadService : Service() {
                 val result = Downloads.run(applicationContext, url, resumeId, lm) { ui -> notifyProgress(ui) }
                 if (result != null) notifyFinished(result)
             } finally {
-                if (running.decrementAndGet() == 0) {
-                    synchronized(this) { links?.stop(); links = null }
-                    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                }
+                if (running.decrementAndGet() == 0) maybeStop()
             }
         }, "download").apply { isDaemon = true; start() }
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
-        // Android 15+ limits data-sync services to 6 h/day: stop cleanly.
-        Downloads.items.value.filter { it.active }.forEach { Downloads.cancel(it.id) }
+        // Android 15+ limits data-sync services to 6 h/day. Pause (progress is kept), never cancel.
+        Downloads.items.value.filter { it.active }.forEach { Downloads.pause(it.id) }
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
@@ -146,11 +157,15 @@ class DownloadService : Service() {
             .build()
         // The first active download shares the foreground notification; others get their own.
         val first = Downloads.items.value.firstOrNull { it.active }?.id == ui.id
-        DualBoostApp.notify(this, if (first) SUMMARY_ID else ui.id.toInt(), n)
+        val nid = if (first) SUMMARY_ID else ui.id.toInt()
+        val prev = shownAs.put(ui.id, nid)
+        if (prev != null && prev != nid && prev != SUMMARY_ID) getSystemService(NotificationManager::class.java).cancel(prev)
+        DualBoostApp.notify(this, nid, n)
     }
 
     private fun notifyFinished(ui: DownloadUi) {
         lastNotify.remove(ui.id)
+        shownAs.remove(ui.id)
         getSystemService(NotificationManager::class.java).cancel(ui.id.toInt())
         if (ui.status == DlStatus.CANCELLED) return
         if (ui.status == DlStatus.PAUSED && ui.error == null) return // paused by the user

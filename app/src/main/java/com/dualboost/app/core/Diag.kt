@@ -24,7 +24,8 @@ object Diag {
 
     private val lines = ArrayDeque<String>()
     private val writer = Executors.newSingleThreadExecutor { r -> Thread(r, "diag").apply { isDaemon = true } }
-    private val stamp = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
+    // SimpleDateFormat is not thread-safe and Diag is called from many threads: one per thread.
+    private val stamp = ThreadLocal.withInitial { SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US) }
     @Volatile private var logFile: File? = null
     @Volatile private var crashFile: File? = null
 
@@ -41,7 +42,7 @@ object Diag {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
             runCatching {
-                crashFile?.writeText("${stamp.format(Date())} crash in thread ${t.name}\n${stack(e)}")
+                crashFile?.writeText("${stamp.get()!!.format(Date())} crash in thread ${t.name}\n${stack(e)}")
                 e("Crash", "uncaught exception in ${t.name}: $e")
             }
             previous?.uncaughtException(t, e)
@@ -53,7 +54,7 @@ object Diag {
     fun e(tag: String, msg: String, t: Throwable? = null) { Log.e(tag, msg, t); add("E", tag, msg + (t?.let { ": $it" } ?: "")) }
 
     private fun add(level: String, tag: String, msg: String) {
-        val line = "${stamp.format(Date())} $level ${tag.removePrefix("DualBoost/")}: $msg"
+        val line = "${stamp.get()!!.format(Date())} $level ${tag.removePrefix("DualBoost/")}: $msg"
         synchronized(lines) {
             lines.addLast(line)
             while (lines.size > MAX_LINES) lines.removeFirst()

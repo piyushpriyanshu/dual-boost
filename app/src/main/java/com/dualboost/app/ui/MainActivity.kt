@@ -79,7 +79,10 @@ class MainActivity : ComponentActivity() {
                 it.copy(mobileTodayBytes = settings.mobileUsedToday(), wifiTodayBytes = settings.wifiUsedToday())
             }
         }
-        handleIntent(intent)
+        // Act on a shortcut/widget/share intent only once: not again after rotation or process restore,
+        // and not when the app is reopened from Recents (which replays the original intent).
+        val fromHistory = (intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+        if (savedInstanceState == null && !fromHistory) handleIntent(intent)
         setContent {
             DualBoostTheme { App(settings, updateTapped, navRequest) }
         }

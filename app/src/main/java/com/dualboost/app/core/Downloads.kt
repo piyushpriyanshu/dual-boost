@@ -106,7 +106,7 @@ object Downloads {
                 )
             }
         } ?: emptyList()
-        _items.value = (paused + history.filter { h -> paused.none { it.id == h.id } }).sortedForUi()
+        synchronized(this) { _items.value = (paused + history.filter { h -> paused.none { it.id == h.id } }).sortedForUi() }
     }
 
     fun isRunning(id: Long) = jobs.containsKey(id)
@@ -121,12 +121,12 @@ object Downloads {
         val f = File(stateDir(context), "$id.json")
         runCatching { loadState(f) }.getOrNull()?.let { st -> runCatching { context.contentResolver.delete(Uri.parse(st.uri), null, null) } }
         f.delete()
-        _items.value = _items.value.filter { it.id != id }
+        synchronized(this) { _items.value = _items.value.filter { it.id != id } }
         saveHistory(context)
     }
 
     fun clearHistory(context: Context) {
-        _items.value = _items.value.filter { it.active || it.status == DlStatus.PAUSED }
+        synchronized(this) { _items.value = _items.value.filter { it.active || it.status == DlStatus.PAUSED } }
         saveHistory(context)
     }
 
@@ -168,9 +168,29 @@ object Downloads {
             for (c in conns) runCatching { c.disconnect() }
         }
         val stopped: Boolean get() = cancelled.get() || paused.get() || failure != null
-        val finished: Boolean get() = queue.isEmpty() && inFlight.isEmpty()
+        /** Every piece is either queued or in flight; both change only under this lock, so this is exact. */
+        val finished: Boolean @Synchronized get() = queue.isEmpty() && inFlight.isEmpty()
+
+        /** Next piece for a worker on [mine]: from the queue, else a takeover; marked in flight atomically. */
+        @Synchronized
+        fun take(mine: LinkType): Piece? {
+            val p = queue.poll() ?: steal(mine) ?: return null
+            inFlight += p
+            return p
+        }
+
+        /** A worker is done with [p]: anything left goes back to the queue before it leaves "in flight". */
+        @Synchronized
+        fun release(p: Piece) {
+            if (p.remaining > 0) queue.add(p)
+            inFlight -= p
+        }
+
+        @Synchronized
+        fun addPiece(p: Piece) { queue.add(p) }
 
         /** Pieces still to download, for saving progress. */
+        @Synchronized
         fun snapshot(): List<LongArray> = (queue.toList() + inFlight.toList())
             .mapNotNull { p -> synchronized(p) { if (p.remaining > 0) longArrayOf(p.pos, p.end) else null } }
             .sortedBy { it[0] }
@@ -244,13 +264,12 @@ object Downloads {
         val saved = resumeId?.let { runCatching { loadState(File(stateDir(context), "$it.json")) }.getOrNull() }
         val startUrl = saved?.url ?: url ?: return null
         val id = saved?.id ?: resumeId ?: System.currentTimeMillis()
-        if (jobs.containsKey(id)) return null
         val job = Job(id)
-        jobs[id] = job
+        if (jobs.putIfAbsent(id, job) != null) return null // already running (e.g. Resume tapped twice)
         val settings = BoostSettings.get(context)
         if (saved != null) { job.wifiBytes.set(saved.wifiBytes); job.mobileBytes.set(saved.mobileBytes) }
-        val countedW = job.wifiBytes.get()
-        val countedM = job.mobileBytes.get()
+        var countedW = job.wifiBytes.get()
+        var countedM = job.mobileBytes.get()
 
         var ui = DownloadUi(
             id, startUrl, saved?.name ?: guessName(startUrl), saved?.size ?: -1, job.wifiBytes.get(), job.mobileBytes.get(),
@@ -268,8 +287,9 @@ object Downloads {
             val u = uri ?: return
             if (!p.ranges || p.size <= 0) return
             runCatching {
+                val pieces = job.snapshot()
                 saveState(context, SavedJob(id, startUrl, p.etag, p.size, ui.name, p.mime, u.toString(),
-                    job.wifiBytes.get(), job.mobileBytes.get(), ui.startedAt, job.snapshot()))
+                    job.wifiBytes.get(), job.mobileBytes.get(), ui.startedAt, pieces))
             }
         }
         try {
@@ -286,13 +306,21 @@ object Downloads {
                 val file = runCatching { resolver.openFileDescriptor(Uri.parse(saved.uri), "rw") }.getOrNull()
                 if (same && file != null) {
                     uri = Uri.parse(saved.uri); pfd = file; resumed = true
-                    for (r in saved.pieces) job.queue.add(Piece(r[0], r[1]))
+                    for (r in saved.pieces) job.addPiece(Piece(r[0], r[1]))
+                    // The pieces are the truth: rebuild the byte counters from them (keeping the Wi-Fi/mobile split).
+                    val left = saved.pieces.sumOf { it[1] - it[0] + 1 }
+                    val doneTotal = (saved.size - left).coerceAtLeast(0)
+                    val sum = saved.wifiBytes + saved.mobileBytes
+                    val w = if (sum > 0) (doneTotal.toDouble() * saved.wifiBytes / sum).toLong() else doneTotal
+                    job.wifiBytes.set(w); job.mobileBytes.set(doneTotal - w)
+                    countedW = job.wifiBytes.get(); countedM = job.mobileBytes.get()
                     Diag.i(TAG, "resume ${saved.name}: ${saved.pieces.size} pieces left")
                 } else {
                     Diag.w(TAG, "can't resume ${saved.name} (server file changed or partial file gone): starting over")
                     runCatching { file?.close() }
                     runCatching { resolver.delete(Uri.parse(saved.uri), null, null) }
                     job.wifiBytes.set(0); job.mobileBytes.set(0)
+                    countedW = 0; countedM = 0
                 }
             }
             ui = ui.copy(name = if (resumed) ui.name else pr.name, size = pr.size, mime = pr.mime, split = pr.ranges && pr.size > 0,
@@ -313,7 +341,7 @@ object Downloads {
                 if (pr.ranges && pr.size > 0) {
                     val chunk = (pr.size / 48).coerceIn(MIN_CHUNK, MAX_CHUNK)
                     var p = 0L
-                    while (p < pr.size) { job.queue.add(Piece(p, minOf(p + chunk, pr.size) - 1)); p += chunk }
+                    while (p < pr.size) { job.addPiece(Piece(p, minOf(p + chunk, pr.size) - 1)); p += chunk }
                 }
             }
             val channel = FileOutputStream(pfd!!.fileDescriptor).channel
@@ -388,7 +416,7 @@ object Downloads {
 
             val total = job.wifiBytes.get() + job.mobileBytes.get()
             if (ranged && !job.finished) throw IOException("Download incomplete")
-            if (pr.size > 0 && total < pr.size) throw IOException("Download incomplete (${total} of ${pr.size} bytes)")
+            if (!ranged && pr.size > 0 && total < pr.size) throw IOException("Download incomplete (${total} of ${pr.size} bytes)")
 
             channel.force(false)
             channel.close(); pfd?.close(); pfd = null
@@ -413,16 +441,37 @@ object Downloads {
             runCatching { pfd?.close() }; pfd = null
             ui = ui.copy(status = DlStatus.PAUSED, wifiMbps = 0.0, mobileMbps = 0.0, etaSec = -1, error = null,
                 wifiBytes = job.wifiBytes.get(), mobileBytes = job.mobileBytes.get())
+            // Paused before a new download had a file: there is nothing to resume.
+            if (saved == null && uri == null) ui = cancelled(ui)
             Diag.i(TAG, "paused ${ui.name} at ${ui.done} bytes")
         } catch (e: Cancelled) {
-            ui = ui.copy(status = DlStatus.CANCELLED, wifiMbps = 0.0, mobileMbps = 0.0, etaSec = -1, finishedAt = System.currentTimeMillis())
+            ui = cancelled(ui)
             cleanup(context, uri, pfd); pfd = null
+            if (saved != null && uri == null) runCatching { resolver.delete(Uri.parse(saved.uri), null, null) }
             deleteState(context, id)
         } catch (e: Exception) {
+          if (job.paused.get() && job.failure == null) {
+            // A pause that interrupted a connection (e.g. during the first request): it is a pause.
+            if (saved != null && probe == null) {
+                ui = ui.copy(status = DlStatus.PAUSED, wifiMbps = 0.0, mobileMbps = 0.0, etaSec = -1, error = null)
+            } else {
+                save()
+                runCatching { pfd?.close() }; pfd = null
+                ui = ui.copy(status = DlStatus.PAUSED, wifiMbps = 0.0, mobileMbps = 0.0, etaSec = -1, error = null,
+                    wifiBytes = job.wifiBytes.get(), mobileBytes = job.mobileBytes.get())
+                if (uri == null) { deleteState(context, id); ui = cancelled(ui) } // nothing was created yet
+            }
+          } else if (job.cancelled.get() && job.failure == null) {
+            // Likewise for a cancel.
+            ui = cancelled(ui)
+            cleanup(context, uri, pfd); pfd = null
+            if (saved != null && uri == null) runCatching { resolver.delete(Uri.parse(saved.uri), null, null) }
+            deleteState(context, id)
+          } else {
             job.stop(pause = false)
             if (e is InterruptedException) Thread.currentThread().interrupt()
             val msg = job.failure ?: e.message ?: "Download failed"
-            Diag.w(TAG, "failed: $startUrl", e)
+            Diag.w(TAG, "failed: ${hostOf(startUrl)}", e)
             val p = probe
             val keep = p != null && p.ranges && p.size > 0 && uri != null && (job.wifiBytes.get() + job.mobileBytes.get()) > 0
             if (saved != null && p == null) {
@@ -440,6 +489,7 @@ object Downloads {
                 cleanup(context, uri, pfd); pfd = null
                 deleteState(context, id)
             }
+          }
         } finally {
             runCatching { pfd?.close() }
             jobs.remove(id)
@@ -447,10 +497,21 @@ object Downloads {
             settings.addWifiUsage((job.wifiBytes.get() - countedW).coerceAtLeast(0))
             settings.addMobileUsage((job.mobileBytes.get() - countedM).coerceAtLeast(0))
         }
+        return finish(context, ui, onUpdate)
+    }
+
+    private fun cancelled(ui: DownloadUi) = ui.copy(
+        status = DlStatus.CANCELLED, wifiMbps = 0.0, mobileMbps = 0.0, etaSec = -1, error = null, finishedAt = System.currentTimeMillis(),
+    )
+
+    private fun finish(context: Context, ui: DownloadUi, onUpdate: (DownloadUi) -> Unit): DownloadUi {
         publish(ui); onUpdate(ui)
         saveHistory(context)
         return ui
     }
+
+    /** Only the host goes into the diagnostic log: full links can contain private tokens. */
+    private fun hostOf(url: String): String = runCatching { Uri.parse(url).host }.getOrNull() ?: "?"
 
     private fun check(job: Job) {
         if (job.cancelled.get()) throw Cancelled()
@@ -529,7 +590,7 @@ object Downloads {
         while (!job.stopped) {
             if (link.type == LinkType.MOBILE && !mobileAllowed()) return
             val net = link.network ?: return
-            val piece = job.queue.poll() ?: job.steal(link.type)
+            val piece = job.take(link.type)
             if (piece == null) {
                 if (job.finished) return
                 // Nothing to take over: race a small stalling piece from the other link, or wait
@@ -539,7 +600,6 @@ object Downloads {
                 try { Thread.sleep(150) } catch (_: InterruptedException) { return }
                 continue
             }
-            job.inFlight += piece
             var ok = false
             val t0 = System.currentTimeMillis()
             val pos0 = piece.pos
@@ -559,10 +619,9 @@ object Downloads {
                     val r = (piece.pos - pos0) / secs
                     if (r > 0) job.connRate.merge(link.type, r) { old, new -> old * 0.5 + new * 0.5 }
                 }
-                job.inFlight -= piece
                 // Anything not fetched goes back in the queue: after an error, a pause or a failure,
                 // so saved progress always lists every missing byte.
-                if (piece.remaining > 0) job.queue.add(piece)
+                job.release(piece)
             }
             if (consecutiveFailures >= 3) {
                 // This link is struggling: back off; the other link keeps going.
