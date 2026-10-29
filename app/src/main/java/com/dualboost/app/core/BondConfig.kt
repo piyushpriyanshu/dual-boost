@@ -94,14 +94,17 @@ object BondConfig {
     fun setupScript(cfg: BondCfg): String = """
 #!/bin/bash
 # DualBoost bond server setup. Paste this into "Initialization script" (cloud-init) when creating the server.
-set -eux
-KEY='${cfg.key}'
+set -eu
 PORT=${cfg.port}
 BIN=/usr/local/bin/dualboost-server
 
+# The key is written without being echoed to the console or logs.
+umask 077
 install -d -m 700 /etc/dualboost
-printf '%s\n' "${'$'}KEY" > /etc/dualboost/key
+printf '%s\n' '${cfg.key}' > /etc/dualboost/key
 chmod 600 /etc/dualboost/key
+umask 022
+set -x
 
 cat > /usr/local/bin/dualboost-update <<'UPD'
 #!/bin/bash
@@ -122,14 +125,16 @@ if ! cmp -s "${'$'}T/s" "${'$'}BIN"; then
 fi
 UPD
 chmod 755 /usr/local/bin/dualboost-update
-/usr/local/bin/dualboost-update
 
 cat > /etc/systemd/system/dualboost.service <<SVC
 [Unit]
 Description=DualBoost bond server
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 [Service]
+# First start (or a missing binary): download it, retrying every 10 s until it works.
+ExecStartPre=+/bin/sh -c 'test -x ${'$'}BIN || /usr/local/bin/dualboost-update'
 ExecStart=${'$'}BIN -listen :${'$'}PORT
 LoadCredential=key:/etc/dualboost/key
 DynamicUser=yes
@@ -137,8 +142,10 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 LimitNOFILE=1048576
+MemoryMax=600M
+TasksMax=4096
 Restart=always
-RestartSec=2
+RestartSec=10
 [Install]
 WantedBy=multi-user.target
 SVC

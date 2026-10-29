@@ -33,18 +33,19 @@ type flow struct {
 	used   time.Time
 
 	// phone → target
-	next     uint64
-	ooo      map[uint64][]byte
-	queue    [][]byte
-	buffered int
-	finAt    int64 // -1 until FIN
-	inDone   bool  // everything up to FIN delivered and target half-closed
-	consumed uint64
-	ackLimit uint64 // limit in the last ACK sent
-	ackDue   bool
-	ackAt    time.Time
-	dgramIDs []uint32
-	early    [][]byte // datagrams that arrived before the UDP socket was ready
+	next           uint64
+	ooo            map[uint64][]byte
+	queue          [][]byte
+	buffered       int
+	finAt          int64 // -1 until FIN
+	inDone         bool  // everything up to FIN delivered and target half-closed
+	consumed       uint64
+	ackLimit       uint64 // limit in the last ACK sent
+	ackDue         bool
+	ackAt          time.Time
+	ackFrameQueued *outFrame // the ACK waiting to be sent, if any (one at a time)
+	dgramIDs       []uint32
+	early          [][]byte // datagrams that arrived before the UDP socket was ready
 
 	// target → phone
 	sendSeq   uint64
@@ -76,22 +77,27 @@ func (s *session) lookup(id uint32) *flow {
 		return nil
 	}
 	if len(s.flows) >= maxFlows {
+		// Full: refuse it clearly so the phone's app gets an error instead of hanging.
+		s.closed[id] = time.Now()
+		s.queueCtrl(&outFrame{typ: fRst, payload: append(put32(nil, id), rstNotAllowed)})
 		return nil
 	}
 	return s.newFlow(id)
 }
 
-// ackFrame builds an ACK if the phone may send more than it last heard.
+// ackFrame builds an ACK frame (its numbers are refreshed again when it is sent).
 func (f *flow) ackFrame() *outFrame {
-	if f.closed || !f.opened {
-		return nil
-	}
+	return &outFrame{typ: fAck, flow: f, payload: f.ackPayload()}
+}
+
+// ackPayload: next = first byte still missing (lets the sender resend exactly what blocks
+// us); limit = how far the phone may send.
+func (f *flow) ackPayload() []byte {
 	limit := f.consumed + recvWindow
 	f.ackDue = false
 	f.ackAt = time.Now()
 	f.ackLimit = limit
-	// next = first byte still missing (lets the sender resend exactly what blocks us).
-	return &outFrame{typ: fAck, payload: put64(put64(put32(nil, f.id), f.next), limit)}
+	return put64(put64(put32(nil, f.id), f.next), limit)
 }
 
 func (s *session) consumedLocked(f *flow, n int) {
@@ -99,9 +105,7 @@ func (s *session) consumedLocked(f *flow, n int) {
 	f.buffered -= n
 	f.used = time.Now()
 	if f.consumed+recvWindow-f.ackLimit >= recvWindow/4 {
-		if a := f.ackFrame(); a != nil {
-			s.queueCtrl(a)
-		}
+		s.queueAckLocked(f)
 	} else {
 		f.ackDue = true
 	}
@@ -170,17 +174,56 @@ func (s *session) onOpen(p []byte) []func() {
 	return nil
 }
 
-// blocked: never reach the server itself, the cloud metadata service or private networks.
 var testAllowLoopback = false
 
+var reserved = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"), // carrier-grade NAT / cloud internals
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
+var (
+	ownMu  sync.Mutex
+	ownAt  time.Time
+	ownSet map[netip.Addr]bool
+)
+
+// own reports whether ip is one of this server's addresses (refreshed every minute).
+func own(ip netip.Addr) bool {
+	ownMu.Lock()
+	defer ownMu.Unlock()
+	if ownSet == nil || time.Since(ownAt) > time.Minute {
+		ownSet = map[netip.Addr]bool{}
+		if as, err := net.InterfaceAddrs(); err == nil {
+			for _, a := range as {
+				if p, err := netip.ParsePrefix(a.String()); err == nil {
+					ownSet[p.Addr().Unmap()] = true
+				}
+			}
+		}
+		ownAt = time.Now()
+	}
+	return ownSet[ip]
+}
+
+// blocked: never reach the server itself, the cloud metadata service, private or reserved networks.
 func blocked(ip netip.Addr) bool {
 	ip = ip.Unmap()
 	if testAllowLoopback && ip.IsLoopback() {
 		return false
 	}
-	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() ||
-		ip.IsUnspecified() || ip.IsMulticast() ||
-		netip.MustParsePrefix("100.64.0.0/10").Contains(ip) // carrier-grade NAT / cloud internals
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() ||
+		ip.IsUnspecified() || ip.IsMulticast() || own(ip) {
+		return true
+	}
+	for _, p := range reserved {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolve(ctx context.Context, host string) (netip.Addr, int) {
@@ -308,6 +351,9 @@ func (s *session) dialUDP(f *flow, host, addr string) {
 
 // sendDgramLocked: lowest-latency subflow; DNS answers go once per link for reliability.
 func (s *session) sendDgramLocked(f *flow, id uint32, data []byte) {
+	if len(data) > maxDgram {
+		return // cannot fit one record; such datagrams are dropped (as an IP network would)
+	}
 	fr := &outFrame{typ: fDgram, payload: append(put32(put32(nil, f.id), id), data...)}
 	dual := f.dualDNS()
 	best := map[byte]*subflow{}
@@ -325,12 +371,23 @@ func (s *session) sendDgramLocked(f *flow, id uint32, data []byte) {
 	}
 	if dual {
 		for _, sf := range best {
-			sf.ctrl = append(sf.ctrl, fr)
+			sf.queueDgram(fr)
 		}
 	} else if top != nil {
-		top.ctrl = append(top.ctrl, fr)
+		top.queueDgram(fr)
 	}
 	s.sched.Broadcast()
+}
+
+// queueDgram adds a datagram, dropping the oldest ones beyond the byte limit
+// (a link slower than the sender: like a full router queue, not unbounded memory).
+func (sf *subflow) queueDgram(fr *outFrame) {
+	sf.dgram = append(sf.dgram, dgramItem{fr, time.Now()})
+	sf.dgramBytes += len(fr.payload)
+	for sf.dgramBytes > dgramQueueMax && len(sf.dgram) > 1 {
+		sf.dgramBytes -= len(sf.dgram[0].f.payload)
+		sf.dgram = sf.dgram[1:]
+	}
 }
 
 func (f *flow) dualDNS() bool { return f.proto == protoUDP && f.port() == 53 }

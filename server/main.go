@@ -28,7 +28,15 @@ type server struct {
 	key      []byte
 	mu       sync.Mutex
 	sessions map[[16]byte]*session
+	pending  chan struct{}  // handshakes in progress (bounded: strangers can't exhaust memory)
+	perIP    map[string]int // handshakes in progress per address
 }
+
+const (
+	maxPending      = 256
+	maxPendingPerIP = 16
+	handshakeTime   = 4 * time.Second
+)
 
 func (s *server) drop(sess *session) {
 	s.mu.Lock()
@@ -82,7 +90,7 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 	log.Printf("DualBoost bond server %s listening on %s", version, ln.Addr())
-	srv := &server{key: key, sessions: map[[16]byte]*session{}}
+	srv := newServer(key)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -94,7 +102,48 @@ func main() {
 	}
 }
 
+func newServer(key []byte) *server {
+	return &server{key: key, sessions: map[[16]byte]*session{}, pending: make(chan struct{}, maxPending), perIP: map[string]int{}}
+}
+
+// admit limits handshakes that have not proven the key yet; the returned func releases the slot.
+func (s *server) admit(c net.Conn) (func(), bool) {
+	host, _, _ := net.SplitHostPort(c.RemoteAddr().String())
+	select {
+	case s.pending <- struct{}{}:
+	default:
+		return nil, false
+	}
+	s.mu.Lock()
+	if s.perIP[host] >= maxPendingPerIP {
+		s.mu.Unlock()
+		<-s.pending
+		return nil, false
+	}
+	s.perIP[host]++
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		if s.perIP[host]--; s.perIP[host] <= 0 {
+			delete(s.perIP, host)
+		}
+		s.mu.Unlock()
+		<-s.pending
+	}, true
+}
+
 func (s *server) serve(c net.Conn) {
+	release, ok := s.admit(c)
+	if !ok {
+		_ = c.Close()
+		return
+	}
+	authed := false
+	defer func() {
+		if !authed {
+			release()
+		}
+	}()
 	if tc, ok := c.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 		_ = tc.SetKeepAlive(true)
@@ -110,33 +159,49 @@ func (s *server) serve(c net.Conn) {
 		_ = c.Close()
 		return
 	}
+	authed = true
+	release()
 	var id [16]byte
 	copy(id[:], p[:16])
 	link, subID, standby := p[16], p[17], p[18] != 0
 	_ = c.SetDeadline(time.Time{})
 
-	s.mu.Lock()
-	sess := s.sessions[id]
+	var sess *session
+	var sf *subflow
 	status := byte(1)
-	if sess == nil {
-		if len(s.sessions) >= maxSessions {
-			s.evictLocked()
+	for tries := 0; sf == nil; tries++ {
+		s.mu.Lock()
+		sess = s.sessions[id]
+		status = 1
+		if sess == nil {
+			if len(s.sessions) >= maxSessions {
+				s.evictLocked()
+			}
+			sess = newSession(id, s)
+			s.sessions[id] = sess
+			status = 0
 		}
-		sess = newSession(id, s)
-		s.sessions[id] = sess
-		status = 0
+		s.mu.Unlock()
+		if sf = sess.attach(sc, subID, link, standby); sf == nil {
+			sess.mu.Lock()
+			ended := sess.gone
+			sess.mu.Unlock()
+			if !ended || tries > 2 {
+				_ = c.Close() // too many subflows
+				return
+			}
+			s.drop(sess) // it ended just now: start a fresh one
+		}
 	}
-	s.mu.Unlock()
-
+	// WELCOME after attaching: the session (and its status) is settled.
 	if _, err := sc.writeFrame(fWelcome, []byte{status, protoVer}); err != nil {
-		_ = c.Close()
+		sess.kill(sf, "welcome failed")
 		return
 	}
 	if err := sc.flush(); err != nil {
-		_ = c.Close()
+		sess.kill(sf, "welcome failed")
 		return
 	}
-	sf := sess.attach(sc, subID, link, standby)
 	if debug {
 		log.Printf("subflow %d link %d from %s (status %d)", subID, link, c.RemoteAddr(), status)
 	}
@@ -147,13 +212,14 @@ func (s *server) serve(c net.Conn) {
 // evictLocked removes the oldest session without subflows.
 func (s *server) evictLocked() {
 	var victim *session
+	var victimAt time.Time
 	for _, x := range s.sessions {
 		x.mu.Lock()
 		idle := len(x.subs) == 0
 		at := x.empty
 		x.mu.Unlock()
-		if idle && (victim == nil || at.Before(victim.empty)) {
-			victim = x
+		if idle && (victim == nil || at.Before(victimAt)) {
+			victim, victimAt = x, at
 		}
 	}
 	if victim != nil {

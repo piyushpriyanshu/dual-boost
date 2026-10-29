@@ -40,9 +40,11 @@ class BondClient(
     private val perLink: Int = 2,
     private val log: (String) -> Unit = {},
 ) {
-    internal class Out(val type: Int, val payload: ByteArray, val flow: BondFlow? = null) {
+    internal class Out(val type: Int, var payload: ByteArray, val flow: BondFlow? = null) {
         /** Already sent a second time over a faster subflow. */
         var copied = false
+        /** When a datagram was queued (stale ones are dropped). */
+        var at = 0L
     }
     internal class LogE(val end: Long, val f: Out)
 
@@ -68,6 +70,14 @@ class BondClient(
         var suspect = false
         /** Last time [rate] was measured with a full pipe. */
         var provenAt = 0L
+        /** Session/datagram bytes arrived since our last SUBACK (confirm soon). */
+        var needAck = false
+        /** Only pings/pongs arrived since then (confirm lazily). */
+        var anyAck = false
+        var lastPing = System.nanoTime()
+        /** Datagrams waiting (bounded; old ones are dropped). */
+        val dgram = ArrayDeque<Out>()
+        var dgramBytes = 0
         val created = System.nanoTime()
 
         fun inflight() = written - subacked
@@ -81,7 +91,13 @@ class BondClient(
     }
 
     private val rnd = SecureRandom()
-    private val sessionId = ByteArray(16).also { rnd.nextBytes(it) }
+    private var sessionId = ByteArray(16).also { rnd.nextBytes(it) }
+    private var lastActive = System.nanoTime()
+    private var activeSince = System.nanoTime()
+    /** Bytes buffered for all flows (received, not yet read by apps). */
+    internal var bufferedTotal = 0L
+    /** Memory promised to the server: sum over flows of (window limit − bytes read). Kept ≤ budget. */
+    internal var committed = 0L
     internal val lock = ReentrantLock()
     private val sched: Condition = lock.newCondition()
     private val subs = HashMap<Int, Sub>()
@@ -166,9 +182,10 @@ class BondClient(
         System.arraycopy(a, 0, p, 5, a.size)
         val o = 5 + a.size
         p[o] = (port ushr 8).toByte(); p[o + 1] = port.toByte()
-        BE.put32(p, o + 2, RECV_WINDOW.toLong())
+        BE.put32(p, o + 2, INIT_WINDOW.toLong())
         lock.withLock {
             flows[id] = f
+            committed += INIT_WINDOW
             queueCtrlLocked(Out(F.OPEN, p))
         }
         return f
@@ -202,12 +219,19 @@ class BondClient(
     internal fun sendDgramLocked(o: Out, dual: Boolean) {
         val usable = subs.values.filter { usableLocked(it) }
         if (usable.isEmpty()) return
+        o.at = System.nanoTime()
         if (dual) {
-            for ((_, group) in usable.groupBy { it.link.type }) group.minByOrNull { it.est(o.payload.size) }!!.ctrl.addLast(o)
+            for ((_, group) in usable.groupBy { it.link.type }) queueDgramLocked(group.minByOrNull { it.est(o.payload.size) }!!, o)
         } else {
-            usable.minByOrNull { it.est(o.payload.size) }!!.ctrl.addLast(o)
+            queueDgramLocked(usable.minByOrNull { it.est(o.payload.size) }!!, o)
         }
         sched.signalAll()
+    }
+
+    /** Bounded like a router queue: beyond the limit the oldest datagrams are dropped. */
+    private fun queueDgramLocked(s: Sub, o: Out) {
+        s.dgram.addLast(o); s.dgramBytes += o.payload.size
+        while (s.dgramBytes > DGRAM_QUEUE_MAX && s.dgram.size > 1) s.dgramBytes -= s.dgram.removeFirst().payload.size
     }
 
     internal fun newCondition(): Condition = lock.newCondition()
@@ -237,15 +261,21 @@ class BondClient(
         while (true) {
             if (s.dead || !running) return@withLock null
             s.ctrl.removeFirstOrNull()?.let { return@withLock it }
+            // Datagrams: real-time, never resent; stale ones are dropped, and they respect the cap.
+            while (s.dgram.isNotEmpty() && s.inflight() < s.cap()) {
+                val d = s.dgram.removeFirst()
+                s.dgramBytes -= d.payload.size
+                if (System.nanoTime() - d.at <= DGRAM_MAX_AGE_NS) { markActiveLocked(); return@withLock d }
+            }
             if (usableLocked(s)) {
-                reinj.removeFirstOrNull()?.let { return@withLock it }
-                ctrlQ.removeFirstOrNull()?.let { return@withLock it }
+                reinj.removeFirstOrNull()?.let { return@withLock freshLocked(it) }
+                ctrlQ.removeFirstOrNull()?.let { return@withLock freshLocked(it) }
                 if (s.inflight() < s.cap() && !tooSlowLocked(s) &&
                     s.est(F.CHUNK) <= 1.2 * minEstLocked(F.CHUNK) + 0.002 + backlogDelayLocked(s)
                 ) {
                     if (oppQ.isEmpty() && rr.isEmpty()) opportunisticLocked(s)
                     oppQ.removeFirstOrNull()?.let { return@withLock it }
-                    if (rr.isNotEmpty()) return@withLock popDataLocked()
+                    if (rr.isNotEmpty()) { markActiveLocked(); return@withLock popDataLocked() }
                 }
             }
             if (!block) return@withLock null
@@ -298,6 +328,29 @@ class BondClient(
         return if (rate == 0.0) 0.0 else queued / rate
     }
 
+    /** An ACK is rebuilt when it is actually sent: latest numbers, and one pending per flow. */
+    private fun freshLocked(o: Out): Out {
+        val f = o.flow
+        if (o.type == F.ACK && f != null) {
+            if (f.ackQueued === o) f.ackQueued = null
+            if (!f.closed) o.payload = f.ackPayloadLocked()
+        }
+        return o
+    }
+
+    internal fun queueAckLocked(f: BondFlow) {
+        if (f.closed || f.ackQueued != null) return
+        val o = Out(F.ACK, f.ackPayloadLocked(), f)
+        f.ackQueued = o
+        queueCtrlLocked(o)
+    }
+
+    private fun markActiveLocked() {
+        val now = System.nanoTime()
+        if (now - lastActive > 2_000_000_000L) activeSince = now
+        lastActive = now
+    }
+
     private fun popDataLocked(): Out {
         val f = rr.first()
         val o = f.out.removeFirst()
@@ -340,9 +393,13 @@ class BondClient(
                     }
                 }
             }
-            // No subflow for ~110 s: the server will have dropped our flows.
-            if (subs.isEmpty() && flows.isNotEmpty() && now - emptySince > 110_000_000_000L) {
+            // No subflow for ~110 s: the server will drop our session. Start a new one cleanly.
+            if (subs.isEmpty() && established && now - emptySince > 110_000_000_000L) {
+                log("no server connection for 110 s: starting a new session")
                 for (f in flows.values.toList()) f.resetLocked(7, notifyServer = false)
+                reinj.clear(); ctrlQ.clear(); rr.clear(); oppQ.clear(); queued = 0
+                sessionId = ByteArray(16).also { rnd.nextBytes(it) }
+                established = false
             }
         }
         for ((id, l) in toDial) Thread({ dial(id, l) }, "bond-dial-$id").apply { isDaemon = true; start() }
@@ -357,7 +414,8 @@ class BondClient(
             sock.soTimeout = HANDSHAKE_TIMEOUT_MS
             val sc = SecureConn.client(sock, key)
             val hello = ByteArray(19)
-            System.arraycopy(sessionId, 0, hello, 0, 16)
+            val sid = lock.withLock { sessionId.copyOf() }
+            System.arraycopy(sid, 0, hello, 0, 16)
             hello[16] = l.type.toByte(); hello[17] = id.toByte(); hello[18] = if (l.standby) 1 else 0
             val helloAt = System.nanoTime()
             sc.write(F.HELLO, hello); sc.flush()
@@ -368,12 +426,14 @@ class BondClient(
             val s = Sub(id, l, sc)
             lock.withLock {
                 connecting.remove(id)
-                if (!running) { sc.close(); return }
+                if (!running || !sid.contentEquals(sessionId)) { sc.close(); return }
                 if (!resumed && established && helloAt > establishedAt) {
                     log("server lost the session (restarted?): resetting flows")
+                    // Kill the old subflows first: their unconfirmed frames must not be replayed
+                    // into the new session.
+                    for (o in subs.values.toList()) killLocked(o, "session reset")
                     for (f in flows.values.toList()) f.resetLocked(7, notifyServer = false)
                     reinj.clear(); ctrlQ.clear(); rr.clear(); oppQ.clear(); queued = 0
-                    for (o in subs.values.toList()) killLocked(o, "session reset")
                 }
                 if (!established || (!resumed && helloAt > establishedAt)) establishedAt = System.nanoTime()
                 established = true
@@ -411,7 +471,7 @@ class BondClient(
         for (i in again.indices.reversed()) reinj.addFirst(again[i])
         if (subs.isEmpty()) emptySince = System.nanoTime()
         ctrlQ.addLast(Out(F.GONE, byteArrayOf(s.id.toByte())))
-        for (f in flows.values) f.ackFrameLocked()?.let { ctrlQ.addLast(it) }
+        for (f in flows.values) queueAckLocked(f)
         log("subflow ${s.id} closed: $why (resending ${again.size})")
         sched.signalAll()
     }
@@ -457,6 +517,12 @@ class BondClient(
             if (s.dead) return
             s.lastRecv = System.nanoTime()
             s.received = s.sc.received
+            when {
+                fr.type == F.SUBACK -> {} // never confirm a confirmation (it would ping-pong forever)
+                F.isSession(fr.type) || fr.type == F.DGRAM -> s.needAck = true
+                else -> s.anyAck = true
+            }
+            if (fr.type == F.DATA || fr.type == F.DGRAM) markActiveLocked()
             if (s.suspect) { s.suspect = false; sched.signalAll() }
             when (fr.type) {
                 F.PING -> { s.ctrl.addLast(Out(F.PONG, b.copyOfRange(o, o + n))); sched.signalAll() }
@@ -488,12 +554,13 @@ class BondClient(
                     if (f != null && f.acceptDgramLocked(BE.u32(b, o + 4))) dgram = f to b.copyOfRange(o + 8, o + n)
                 }
             }
-            if (s.received - s.ackSent >= 16 * 1024) subAckLocked(s)
+            if (s.needAck && s.received - s.ackSent >= 16 * 1024) subAckLocked(s)
         }
         dgram?.let { (f, d) -> f.deliverDgram(d) }
     }
 
     private fun subAckLocked(s: Sub) {
+        s.needAck = false; s.anyAck = false
         s.ackSent = s.received
         s.ackAt = System.nanoTime()
         val p = ByteArray(8); BE.put64(p, 0, s.received)
@@ -512,7 +579,19 @@ class BondClient(
             lock.withLock {
                 val now = System.nanoTime()
                 for (s in subs.values.toList()) {
-                    if (s.received != s.ackSent && now - s.ackAt >= 10_000_000L) subAckLocked(s)
+                    // Data within 10 ms; pings/pongs lazily (once a second) so idle links stay quiet.
+                    val busyNow = now - lastActive < 2_000_000_000L
+                    if ((s.needAck && now - s.ackAt >= 10_000_000L) ||
+                        (s.anyAck && now - s.ackAt >= if (busyNow) 1_000_000_000L else 5_000_000_000L)
+                    ) subAckLocked(s)
+                    // Ping every 250 ms while traffic flows, every 5 s when idle (mobile data, battery).
+                    if (now - s.lastPing >= if (busyNow) 250_000_000L else 5_000_000_000L) {
+                        s.lastPing = now
+                        s.pingId++
+                        val p = ByteArray(12); BE.put32(p, 0, s.pingId); BE.put64(p, 4, now - start)
+                        s.ctrl.addLast(Out(F.PING, p))
+                        sched.signalAll()
+                    }
                     if (n % 20 == 0) {
                         val dt = (now - s.sampleAt) / 1e9
                         val d = s.subacked - s.sampleAck
@@ -525,14 +604,12 @@ class BondClient(
                         s.sampleAt = now; s.sampleAck = s.subacked; s.sampleBusy = busy
                     }
                     if (n % 50 == 0) {
-                        s.pingId++
-                        val p = ByteArray(12); BE.put32(p, 0, s.pingId); BE.put64(p, 4, now - start)
-                        s.ctrl.addLast(Out(F.PING, p))
                         while (s.rtts.isNotEmpty() && now - s.rtts.first()[0] > 30_000_000_000L) s.rtts.removeFirst()
                         s.rtts.minOfOrNull { it[1] }?.let { s.minRtt = it }
-                        if (now - s.lastRecv > 2_500_000_000L) killLocked(s, "silent")
+                        val limit = if (busyNow && now - activeSince > 3_000_000_000L) 2_500_000_000L else 12_000_000_000L
+                        if (now - s.lastRecv > limit) killLocked(s, "silent")
                     }
-                    if (!s.dead && !s.suspect && now - s.lastRecv > 700_000_000L &&
+                    if (busyNow && !s.dead && !s.suspect && now - s.lastRecv > 700_000_000L &&
                         subs.values.any { it !== s && !it.dead && now - it.lastRecv < 300_000_000L }
                     ) {
                         s.suspect = true
@@ -542,8 +619,8 @@ class BondClient(
                         sched.signalAll()
                     }
                 }
-                for (f in flows.values) {
-                    if ((f.ackDue || f.hasGapLocked()) && now - f.ackAt >= 20_000_000L) f.ackFrameLocked()?.let { ctrlQ.addLast(it) }
+                if (subs.isNotEmpty()) for (f in flows.values) {
+                    if ((f.ackDue || f.hasGapLocked()) && now - f.ackAt >= 20_000_000L) queueAckLocked(f)
                 }
                 if (rr.isNotEmpty() || ctrlQ.isNotEmpty() || reinj.isNotEmpty()) sched.signalAll()
                 if (n % 2000 == 0) {
@@ -555,7 +632,17 @@ class BondClient(
     }
 
     internal companion object {
+        /** Most a single flow may have buffered on the phone. */
         const val RECV_WINDOW = 16 shl 20
+        /** First window of a new flow; it grows to [RECV_WINDOW] while memory allows. */
+        const val INIT_WINDOW = 2 shl 20
+        /** Most memory all flows together may be promised (the phone can't run out of memory). */
+        const val BUFFER_BUDGET = 64L shl 20
+        /** Every flow always gets at least this window, so none can starve. */
+        const val MIN_GRANT = 256L * 1024
+        const val DGRAM_QUEUE_MAX = 256 * 1024
+        const val DGRAM_MAX_AGE_NS = 200_000_000L
+        const val MAX_DGRAM = F.MAX_PLAIN - 1 - 8
         const val SERVER_WINDOW = 4L shl 20
         const val OUT_CAP = 512 * 1024
         const val CONNECT_TIMEOUT_MS = 5_000
@@ -583,7 +670,9 @@ class BondFlow internal constructor(
     private var buffered = 0
     private var finAt = -1L
     private var consumed = 0L
-    private var ackLimit = BondClient.RECV_WINDOW.toLong()
+    private var ackLimit = BondClient.INIT_WINDOW.toLong()
+    /** The ACK waiting to be sent (one at a time; its numbers are refreshed when sent). */
+    internal var ackQueued: BondClient.Out? = null
     internal var ackDue = false
     internal var ackAt = System.nanoTime()
     private val dgramIds = ArrayDeque<Long>()
@@ -617,12 +706,14 @@ class BondFlow internal constructor(
         if (end <= next) return
         if (seq < next) { val skip = (next - seq).toInt(); off += skip; len -= skip; seq = next }
         if (seq > next) {
-            if (!ooo.containsKey(seq) && buffered + len <= BondClient.RECV_WINDOW + F.CHUNK) {
-                ooo[seq] = b.copyOfRange(off, off + len); buffered += len
+            // Never more than the window we granted (a misbehaving sender can't fill our memory).
+            if (!ooo.containsKey(seq) && end <= ackLimit + F.CHUNK) {
+                ooo[seq] = b.copyOfRange(off, off + len); buffered += len; c.bufferedTotal += len
             }
             return
         }
-        ready.addLast(b.copyOfRange(off, off + len)); buffered += len; next = end
+        if (end > ackLimit + F.CHUNK) return
+        ready.addLast(b.copyOfRange(off, off + len)); buffered += len; c.bufferedTotal += len; next = end
         while (true) {
             val d = ooo.remove(next) ?: break
             ready.addLast(d); next += d.size
@@ -641,19 +732,29 @@ class BondFlow internal constructor(
         confirmed = maxOf(confirmed, limit - BondClient.SERVER_WINDOW)
     }
 
-    internal fun ackFrameLocked(): BondClient.Out? {
-        if (closed) return null
-        val limit = consumed + BondClient.RECV_WINDOW
+    /**
+     * Window this flow may have now: up to [BondClient.RECV_WINDOW], but all flows together never
+     * more than [BondClient.BUFFER_BUDGET] (each keeps at least [BondClient.MIN_GRANT]).
+     */
+    private fun grantLocked(): Long {
+        val mine = ackLimit - consumed
+        val room = BondClient.BUFFER_BUDGET - (c.committed - mine)
+        return room.coerceIn(BondClient.MIN_GRANT, BondClient.RECV_WINDOW.toLong())
+    }
+
+    /** next = first byte still missing (the server can resend exactly what blocks us); limit only grows. */
+    internal fun ackPayloadLocked(): ByteArray {
+        val limit = maxOf(ackLimit, consumed + grantLocked())
+        c.committed += limit - ackLimit
         ackDue = false; ackAt = System.nanoTime(); ackLimit = limit
-        // next = first byte still missing, so the server can resend exactly what blocks us.
         val p = ByteArray(20); BE.put32(p, 0, id); BE.put64(p, 4, next); BE.put64(p, 12, limit)
-        return BondClient.Out(F.ACK, p)
+        return p
     }
 
     private fun consumedLocked(n: Int) {
-        consumed += n; buffered -= n
-        if (consumed + BondClient.RECV_WINDOW - ackLimit >= BondClient.RECV_WINDOW / 4) ackFrameLocked()?.let { c.queueCtrlLocked(it) }
-        else ackDue = true
+        consumed += n; buffered -= n; c.bufferedTotal -= n; c.committed -= n
+        val grant = grantLocked()
+        if (consumed + grant - ackLimit >= grant / 4) c.queueAckLocked(this) else ackDue = true
         maybeDoneLocked()
     }
 
@@ -722,9 +823,19 @@ class BondFlow internal constructor(
         maybeDoneLocked()
     }
 
+    private var released = false
+
+    /** Gives this flow's promised window back to the budget (once). */
+    private fun releaseLocked() {
+        if (released) return
+        released = true
+        c.committed -= ackLimit - consumed
+    }
+
     private fun maybeDoneLocked() {
         if (!closed && finSent && eofSeen && finAt >= 0 && consumed >= finAt) {
             closed = true
+            releaseLocked()
             c.forgetLocked(this)
             cond.signalAll()
         }
@@ -742,6 +853,8 @@ class BondFlow internal constructor(
         if (!notifyServer) resetCode = code
         c.dropOutLocked(this)
         ready.clear(); ooo.clear()
+        c.bufferedTotal -= buffered; buffered = 0
+        releaseLocked()
         if (notifyServer) {
             val p = ByteArray(5); BE.put32(p, 0, id); p[4] = code.toByte()
             c.queueCtrlLocked(BondClient.Out(F.RST, p))
@@ -755,6 +868,7 @@ class BondFlow internal constructor(
     /** Sends one datagram (UDP flows). DNS goes once per link. */
     fun send(data: ByteArray, off: Int, len: Int) = c.lock.withLock {
         if (closed) throw IOException("closed")
+        if (len > BondClient.MAX_DGRAM) return@withLock // can't fit one record: dropped, like an IP network would
         dgramNext = (dgramNext + 1) and 0xFFFFFFFFL
         val p = ByteArray(8 + len); BE.put32(p, 0, id); BE.put32(p, 4, dgramNext)
         System.arraycopy(data, off, p, 8, len)

@@ -29,6 +29,18 @@ type logEntry struct {
 	f   *outFrame
 }
 
+type dgramItem struct {
+	f  *outFrame
+	at time.Time
+}
+
+const (
+	dgramQueueMax = 256 << 10              // datagram bytes waiting per subflow
+	dgramMaxAge   = 200 * time.Millisecond // older datagrams are useless (real-time traffic)
+	maxDgram      = maxPlain - 1 - 8       // largest datagram payload that fits one record
+	maxSubflows   = 16
+)
+
 type rttSample struct {
 	at  time.Time
 	rtt time.Duration
@@ -62,6 +74,11 @@ type subflow struct {
 	suspect    bool      // silent while the others are fine: no new data, unconfirmed data copied elsewhere
 	provenAt   time.Time // last time rate was measured with a full pipe
 	created    time.Time
+	needAck    bool // session/datagram bytes arrived since our last SUBACK (confirm soon)
+	anyAck     bool // only pings/pongs arrived since then (confirm lazily)
+	lastPing   time.Time
+	dgram      []dgramItem // datagrams waiting, bounded (old ones are dropped)
+	dgramBytes int
 }
 
 func (s *subflow) inflight() uint64 { return s.written - s.subacked }
@@ -103,21 +120,25 @@ type session struct {
 	flows  map[uint32]*flow
 	closed map[uint32]time.Time
 
-	reinj  []*outFrame // frames from dead subflows, resent first, in order
-	oppQ   []*outFrame // copies of chunks the receiver is stuck on, for fast subflows
-	ctrlQ  []*outFrame // session control frames (ACK, FIN, RST, GONE)
-	rr     []*flow     // flows with DATA waiting, served round-robin
-	queued int         // DATA bytes waiting in rr
-	empty  time.Time   // when the last subflow went away
-	start  time.Time
-	done   chan struct{}
-	server *server
+	reinj       []*outFrame // frames from dead subflows, resent first, in order
+	oppQ        []*outFrame // copies of chunks the receiver is stuck on, for fast subflows
+	ctrlQ       []*outFrame // session control frames (ACK, FIN, RST, GONE)
+	rr          []*flow     // flows with DATA waiting, served round-robin
+	queued      int         // DATA bytes waiting in rr
+	empty       time.Time   // when the last subflow went away
+	start       time.Time
+	gone        bool      // ended: new subflows must start a fresh session
+	lastActive  time.Time // last DATA/DGRAM in either direction
+	activeSince time.Time // start of the current busy period
+	done        chan struct{}
+	server      *server
 }
 
 func newSession(id [16]byte, srv *server) *session {
 	s := &session{
 		id: id, subs: map[byte]*subflow{}, flows: map[uint32]*flow{}, closed: map[uint32]time.Time{},
 		start: time.Now(), empty: time.Now(), done: make(chan struct{}), server: srv,
+		lastActive: time.Now(), activeSince: time.Now(),
 	}
 	s.sched = sync.NewCond(&s.mu)
 	go s.ticker()
@@ -128,15 +149,24 @@ func (s *session) now() uint64 { return uint64(time.Since(s.start).Nanoseconds()
 
 // ---------------------------------------------------------------- subflows
 
+// attach adds a subflow; nil if the session has just ended (caller starts a new one)
+// or already has too many subflows.
 func (s *session) attach(sc *secureConn, subID, link byte, standby bool) *subflow {
 	s.mu.Lock()
+	if s.gone {
+		s.mu.Unlock()
+		return nil
+	}
 	if old := s.subs[subID]; old != nil {
 		s.killLocked(old, "replaced")
+	} else if len(s.subs) >= maxSubflows {
+		s.mu.Unlock()
+		return nil
 	}
 	sf := &subflow{
 		sess: s, id: subID, link: link, standby: standby, sc: sc,
 		rate: 1 << 20, minRtt: 50 * time.Millisecond, lastRecv: time.Now(), sampleAt: time.Now(), ackAt: time.Now(),
-		created: time.Now(),
+		created: time.Now(), lastPing: time.Now(),
 	}
 	s.subs[subID] = sf
 	s.sched.Broadcast()
@@ -177,11 +207,9 @@ func (s *session) killLocked(sf *subflow, why string) {
 		s.empty = time.Now()
 	}
 	s.ctrlQ = append(s.ctrlQ, &outFrame{typ: fGone, payload: []byte{sf.id}})
-	// The peer may have lost our latest window updates: send them again.
+	// The peer may have lost our latest window updates: send them again (once per flow).
 	for _, f := range s.flows {
-		if a := f.ackFrame(); a != nil {
-			s.ctrlQ = append(s.ctrlQ, a)
-		}
+		s.queueAckLocked(f)
 	}
 	if debug {
 		log.Printf("subflow %d (link %d) gone: %s; resending %d frames; inflight %d cap %d rate %.0f rtt %v rr %d ctrl %d",
@@ -256,16 +284,26 @@ func (s *session) next(sf *subflow, prev *outFrame, written uint64, block bool) 
 			sf.ctrl = sf.ctrl[1:]
 			return f
 		}
+		// Datagrams: real-time, never resent; stale ones are dropped, and they respect the cap.
+		for len(sf.dgram) > 0 && sf.inflight() < sf.cap() {
+			d := sf.dgram[0]
+			sf.dgram = sf.dgram[1:]
+			sf.dgramBytes -= len(d.f.payload)
+			if time.Since(d.at) <= dgramMaxAge {
+				s.markActive()
+				return d.f
+			}
+		}
 		if s.usable(sf) {
 			if len(s.reinj) > 0 {
 				f := s.reinj[0]
 				s.reinj = s.reinj[1:]
-				return f
+				return s.fresh(f)
 			}
 			if len(s.ctrlQ) > 0 {
 				f := s.ctrlQ[0]
 				s.ctrlQ = s.ctrlQ[1:]
-				return f
+				return s.fresh(f)
 			}
 			if sf.inflight() < sf.cap() && !s.tooSlow(sf) && sf.est(chunkSize) <= 1.2*s.minEst(chunkSize)+0.002+s.backlogDelay(sf) {
 				if len(s.oppQ) == 0 && len(s.rr) == 0 {
@@ -277,6 +315,7 @@ func (s *session) next(sf *subflow, prev *outFrame, written uint64, block bool) 
 					return f
 				}
 				if len(s.rr) > 0 {
+					s.markActive()
 					return s.popData()
 				}
 			}
@@ -367,6 +406,40 @@ func (s *session) backlogDelay(sf *subflow) float64 {
 	return float64(s.queued) / rate
 }
 
+// fresh rebuilds an ACK at send time (latest numbers; one pending ACK per flow).
+func (s *session) fresh(f *outFrame) *outFrame {
+	if f.typ == fAck && f.flow != nil {
+		fl := f.flow
+		if fl.ackFrameQueued == f {
+			fl.ackFrameQueued = nil
+		}
+		if !fl.closed {
+			f.payload = fl.ackPayload()
+		}
+	}
+	return f
+}
+
+// queueAckLocked queues an ACK for f unless one is already waiting.
+func (s *session) queueAckLocked(f *flow) {
+	if f.closed || !f.opened || f.ackFrameQueued != nil {
+		return
+	}
+	a := f.ackFrame()
+	f.ackFrameQueued = a
+	s.queueCtrl(a)
+}
+
+func (s *session) markActive() {
+	now := time.Now()
+	if now.Sub(s.lastActive) > 2*time.Second {
+		s.activeSince = now
+	}
+	s.lastActive = now
+}
+
+func (s *session) active(now time.Time) bool { return now.Sub(s.lastActive) < 2*time.Second }
+
 // popData takes one DATA frame, round-robin across flows.
 func (s *session) popData() *outFrame {
 	f := s.rr[0]
@@ -402,7 +475,7 @@ func (s *session) queueCtrl(fr *outFrame) {
 
 func (s *subflow) writeLoop() {
 	var prev *outFrame
-	var written uint64
+	written := s.sc.written // the WELCOME is already on the wire
 	for {
 		f := s.sess.next(s, prev, written, false)
 		if f == nil {
@@ -445,6 +518,17 @@ func (s *session) handle(sf *subflow, typ byte, p []byte) {
 	}
 	sf.lastRecv = time.Now()
 	sf.received = sf.sc.received
+	switch {
+	case typ == fSubAck:
+		// never confirm a confirmation (that would ping-pong forever)
+	case isSessionFrame(typ) || typ == fDgram:
+		sf.needAck = true
+	default:
+		sf.anyAck = true
+	}
+	if typ == fData || typ == fDgram {
+		s.markActive()
+	}
 	if sf.suspect {
 		sf.suspect = false // it was only slow
 		s.sched.Broadcast()
@@ -507,7 +591,7 @@ func (s *session) handle(sf *subflow, typ byte, p []byte) {
 		after = append(after, s.onDgram(p)...)
 	}
 	// Confirm what we received: often enough for the peer's scheduler and log.
-	if sf.received-sf.ackSent >= 16*1024 {
+	if sf.needAck && sf.received-sf.ackSent >= 16*1024 {
 		s.subAckLocked(sf)
 	}
 	s.mu.Unlock()
@@ -517,6 +601,7 @@ func (s *session) handle(sf *subflow, typ byte, p []byte) {
 }
 
 func (s *session) subAckLocked(sf *subflow) {
+	sf.needAck, sf.anyAck = false, false
 	sf.ackSent = sf.received
 	sf.ackAt = time.Now()
 	sf.ctrl = append(sf.ctrl, &outFrame{typ: fSubAck, payload: put64(nil, sf.received)})
@@ -540,7 +625,12 @@ func (s *session) ticker() {
 		s.mu.Lock()
 		now := time.Now()
 		for _, sf := range s.subs {
-			if sf.received != sf.ackSent && now.Sub(sf.ackAt) >= 10*time.Millisecond {
+			// Data is confirmed within 10 ms; pings/pongs lazily (once a second) so idle links stay quiet.
+			lazy := 5 * time.Second
+			if s.active(now) {
+				lazy = time.Second
+			}
+			if (sf.needAck && now.Sub(sf.ackAt) >= 10*time.Millisecond) || (sf.anyAck && now.Sub(sf.ackAt) >= lazy) {
 				s.subAckLocked(sf)
 			}
 			if n%20 == 0 { // 100 ms: rate sample
@@ -559,9 +649,16 @@ func (s *session) ticker() {
 				}
 				sf.sampleAt, sf.sampleAck, sf.sampleBusy = now, sf.subacked, busy
 			}
-			if n%50 == 0 { // 250 ms: ping, rtt window, liveness
+			// Ping every 250 ms while traffic flows. When idle the server stays silent: the phone
+			// pings every 5 s, which keeps both sides' liveness checks fed (mobile data, battery).
+			busy := s.active(now)
+			if busy && now.Sub(sf.lastPing) >= 250*time.Millisecond {
+				sf.lastPing = now
 				sf.pingID++
 				sf.ctrl = append(sf.ctrl, &outFrame{typ: fPing, payload: put64(put32(nil, sf.pingID), s.now())})
+				s.sched.Broadcast()
+			}
+			if n%50 == 0 { // 250 ms: rtt window, liveness
 				keep := sf.rtts[:0]
 				m := time.Duration(0)
 				for _, r := range sf.rtts { // 30 s window: pings under load read high
@@ -576,13 +673,17 @@ func (s *session) ticker() {
 				if m > 0 {
 					sf.minRtt = m
 				}
-				if now.Sub(sf.lastRecv) > 2500*time.Millisecond {
+				limit := 12 * time.Second // idle (the phone pings every 5 s), or just became busy
+				if busy && now.Sub(s.activeSince) > 3*time.Second {
+					limit = 2500 * time.Millisecond
+				}
+				if now.Sub(sf.lastRecv) > limit {
 					s.killLocked(sf, "silent")
 				}
 			}
 			// Silent for 0.7 s while another subflow is talking: stop using it and resend its
 			// unconfirmed data elsewhere right away (it is not killed: it may just be slow).
-			if !sf.dead && !sf.suspect && now.Sub(sf.lastRecv) > 700*time.Millisecond {
+			if busy && !sf.dead && !sf.suspect && now.Sub(sf.lastRecv) > 700*time.Millisecond {
 				fresh := false
 				for _, o := range s.subs {
 					if o != sf && !o.dead && now.Sub(o.lastRecv) < 300*time.Millisecond {
@@ -604,10 +705,8 @@ func (s *session) ticker() {
 			}
 		}
 		for _, f := range s.flows {
-			if (f.ackDue || len(f.ooo) > 0) && now.Sub(f.ackAt) >= 20*time.Millisecond {
-				if a := f.ackFrame(); a != nil {
-					s.ctrlQ = append(s.ctrlQ, a)
-				}
+			if len(s.subs) > 0 && (f.ackDue || len(f.ooo) > 0) && now.Sub(f.ackAt) >= 20*time.Millisecond {
+				s.queueAckLocked(f)
 			}
 			if n%200 == 0 {
 				after = append(after, s.idleCheckLocked(f, now)...)
@@ -634,6 +733,7 @@ func (s *session) ticker() {
 		}
 		gc := len(s.subs) == 0 && now.Sub(s.empty) > 120*time.Second
 		if gc {
+			s.gone = true
 			for _, f := range s.flows {
 				s.dropOutLocked(f)
 				after = append(after, s.closeFlowLocked(f, false, 0)...)

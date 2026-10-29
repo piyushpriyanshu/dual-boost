@@ -53,14 +53,19 @@ in order, on a live subflow. All session frames are idempotent: DATA is deduplic
 OPEN of a known flow is ignored, FIN/RST/ACK are safe to repeat. Frames for a flow that was
 already closed are ignored. DATA/FIN that arrive before their OPEN are held until it arrives.
 
-A subflow is dead when its socket fails, or when nothing has been received on it for 2.5 s
-while the peer is otherwise alive. The detecting side sends GONE on a live subflow so the
+SUBACK is sent only for received bytes other than SUBACKs (never confirm a confirmation):
+within 10 ms for session frames and datagrams, lazily (1 s busy, 5 s idle) for pings/pongs.
+PING runs every 250 ms on both sides while data flows; when idle only the phone pings, every
+5 s. A subflow is dead when its socket fails, or when nothing has been received on it for
+2.5 s while busy (12 s idle). While busy, a subflow silent for 0.7 s while another is talking
+becomes *suspect*: it gets no new data and its unconfirmed frames are copied to others. The detecting side sends GONE on a live subflow so the
 other side resends its log for that subflow immediately.
 
 ## 4. Flow control
 
-Each flow direction has a window. OPEN carries the phone's receive window; the server's is
-4 MiB. The receiver sends `ACK next limit`: `next` is the first byte it is still missing, and the sender may send bytes up to `limit`. While data is out of order, ACK repeats every 20 ms. When a sender is window-blocked and the missing chunk sits on a clearly slower subflow, it sends copies of it (and the chunks after it there) over a faster subflow (opportunistic resend).
+Each flow direction has a window. OPEN carries the phone's first receive window (2 MiB); it
+grows up to 16 MiB per flow, but the phone never promises more than 64 MiB over all flows
+together (each flow keeps at least 256 KiB). The server's window is 4 MiB. The receiver sends `ACK next limit`: `next` is the first byte it is still missing, and the sender may send bytes up to `limit`. While data is out of order, ACK repeats every 20 ms. When a sender is window-blocked and the missing chunk sits on a clearly slower subflow, it sends copies of it (and the chunks after it there) over a faster subflow (opportunistic resend).
 Buffered (in-order + out-of-order) data never exceeds the window. ACK is sent when consumption
 advanced by a quarter of the window, at most every 20 ms, and again for every flow after a GONE.
 
@@ -73,7 +78,9 @@ A ready subflow writer takes the next frame only if `est(s) ≤ 1.2 · min est +
 usable subflows, and its inflight is below `max(4 · rate · minRtt, 256 KiB)`. Standby subflows
 (Backup mode, data limit, or the "combining is slower" verdict) are used only when no
 non-standby subflow is alive. Datagrams go to the subflow with the lowest est; DNS goes once
-per link (deduplicated by id).
+per link (deduplicated by id). Datagrams wait in a per-subflow queue of at most 256 KiB
+(oldest dropped), are dropped after 200 ms, respect the inflight cap, and are never resent.
+A datagram larger than 16 391 bytes is dropped.
 
 ## 6. Sessions
 
@@ -81,7 +88,13 @@ A session lives while it has subflows, and for 120 s after the last one is gone.
 0 on a session the phone thought was alive means the server restarted: the phone resets all
 flows and starts a new session id.
 
-## 7. Speed flows
+## 7. Limits
+
+Server: at most 256 unauthenticated handshakes at once (16 per address, 4 s each), 16 sessions,
+16 subflows per session, 8192 flows per session (beyond that, OPEN gets RST 6). Flows may not
+reach loopback, private, link-local, CGNAT, reserved ranges or the server's own addresses.
+
+## 8. Speed flows
 
 proto 3: the server sends an endless zero stream (flow-controlled) until the phone sends RST.
 proto 4: the server reads and discards; its ACKs show the upload rate.

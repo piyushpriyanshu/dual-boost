@@ -98,7 +98,7 @@ func gcm(k []byte) cipher.AEAD {
 
 // serverHandshake runs the key exchange on an accepted connection.
 func serverHandshake(c net.Conn, key []byte) (*secureConn, error) {
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	_ = c.SetDeadline(time.Now().Add(handshakeTime))
 	hello := make([]byte, 4+32)
 	if _, err := io.ReadFull(c, hello); err != nil {
 		return nil, err
@@ -137,7 +137,7 @@ func clientHandshake(c net.Conn, key []byte) (*secureConn, error) {
 
 func newSecure(c net.Conn, rd, wr cipher.AEAD) *secureConn {
 	return &secureConn{
-		c: c, br: bufio.NewReaderSize(c, 128*1024), bw: bufio.NewWriterSize(c, 128*1024),
+		c: c, br: bufio.NewReaderSize(c, 64*1024), bw: bufio.NewWriterSize(c, 64*1024),
 		rd: rd, wr: wr, rbuf: make([]byte, maxPlain+64), wbuf: make([]byte, 0, maxPlain+64),
 	}
 }

@@ -14,7 +14,7 @@ func TestEchoOneSubflow(t *testing.T) {
 	key := make([]byte, 32)
 	rand.Read(key)
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	srv := &server{key: key, sessions: map[[16]byte]*session{}}
+	srv := newServer(key)
 	go func() {
 		for {
 			c, err := ln.Accept()

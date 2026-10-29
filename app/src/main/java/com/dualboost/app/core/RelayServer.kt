@@ -379,6 +379,25 @@ class RelayServer(
         var app: String? = null
         var appResolved = false
         val bonded = HashMap<InetSocketAddress, BondFlow>()
+        // Bonded replies are handed to one writer per UDP session, so a slow engine socket can
+        // never stall a bond subflow (the queue is bounded; when full, datagrams are dropped).
+        val replies = java.util.concurrent.ArrayBlockingQueue<ByteArray>(512)
+        var replyWriter: java.util.concurrent.Future<*>? = null
+        fun startWriter() {
+            if (replyWriter != null) return
+            replyWriter = runCatching {
+                pool.submit {
+                    try {
+                        while (true) {
+                            val fr = replies.take()
+                            if (fr.isEmpty()) break
+                            synchronized(cout) { cout.write(fr); cout.flush() }
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+            }.getOrNull()
+        }
         try {
             val head = ByteArray(3)
             val payload = ByteArray(65_535)
@@ -393,7 +412,8 @@ class RelayServer(
                 val dst = target.addr ?: continue // engine always sends IP addresses
                 if (!appResolved) { app = appOf(true, source, dst, target.port); appResolved = true }
                 val b = bondFor?.invoke(app, true, target.port)
-                if (b != null && sendBonded(b, bonded, dst, target.port, payload, dataLen, cout)) continue
+                if (b != null) startWriter()
+                if (b != null && sendBonded(b, bonded, dst, target.port, payload, dataLen, replies)) continue
                 legs = legs.filter { !it.closed }
                 // DNS goes out over both links at once; the first answer wins (apps ignore the duplicate).
                 val dual = target.port == 53
@@ -416,19 +436,21 @@ class RelayServer(
         } finally {
             for (leg in legs) leg.close()
             for (f in bonded.values) f.close()
+            replies.clear(); replies.offer(ByteArray(0)) // stops the reply writer
+            replyWriter?.cancel(true)
         }
     }
 
     /** Sends one datagram through the bond (one bonded flow per destination). False = send directly. */
     private fun sendBonded(
         b: BondClient, flows: HashMap<InetSocketAddress, BondFlow>, dst: InetAddress, port: Int,
-        data: ByteArray, len: Int, cout: OutputStream,
+        data: ByteArray, len: Int, replies: java.util.concurrent.BlockingQueue<ByteArray>,
     ): Boolean {
         val key = InetSocketAddress(dst, port)
         var f = flows[key]?.takeIf { !it.closed }
         if (f == null) {
             f = try {
-                b.openUdp(dst, port) { d, off, n -> runCatching { writeUdpFrame(cout, dst, port, d, off, n) } }
+                b.openUdp(dst, port) { d, off, n -> replies.offer(udpFrame(dst, port, d, off, n)) }
             } catch (e: Exception) { return false }
             flows[key] = f
         }
@@ -436,7 +458,7 @@ class RelayServer(
     }
 
     /** UDP-in-TCP frame back to the engine: [len][hdrlen][ATYP ADDR PORT][payload]. */
-    private fun writeUdpFrame(cout: OutputStream, src: InetAddress, port: Int, data: ByteArray, off: Int, len: Int) {
+    private fun udpFrame(src: InetAddress, port: Int, data: ByteArray, off: Int, len: Int): ByteArray {
         val addrBytes = src.address
         val v4 = src is Inet4Address
         val addrLen = if (v4) 7 else 19
@@ -450,7 +472,7 @@ class RelayServer(
         frame[p] = (port ushr 8).toByte()
         frame[p + 1] = port.toByte()
         System.arraycopy(data, off, frame, p + 2, len)
-        synchronized(cout) { cout.write(frame); cout.flush() }
+        return frame
     }
 
     private fun openUdpLegs(
