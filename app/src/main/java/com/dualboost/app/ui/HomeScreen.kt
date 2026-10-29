@@ -124,7 +124,10 @@ fun HomeScreen(
 
             Spacer(Modifier.height(Db.s4))
             Text(
-                "Downloads, app updates and multi-connection speed tests get the full combined speed. A single video stream uses one link at a time.",
+                if (ui.bond.status == com.dualboost.app.core.BondStatus.CONNECTED)
+                    "Bonded through your server: every connection, even a single video or download, uses both links."
+                else
+                    "Downloads, app updates and multi-connection speed tests get the full combined speed. A single video stream uses one link at a time. Set up a Bond server in Settings to combine those too.",
                 color = c.muted, style = Db.small, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = Db.s4),
             )
@@ -171,8 +174,14 @@ private fun HeroCard(ui: BoostUi, on: Boolean) {
 
     DbCard(Modifier.fillMaxWidth(), padding = Db.s5) {
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            val bonded = ui.bond.status == com.dualboost.app.core.BondStatus.CONNECTED
             val (pillText, pillDot) = when (ui.phase) {
-                Phase.ON -> (if (readyLinks >= 2) "Boosting · 2 links" else "Running · 1 link") to (if (readyLinks >= 2) c.good else c.warn)
+                Phase.ON -> when {
+                    bonded && ui.bond.wifiUp && ui.bond.mobileUp -> "Bonded · 2 links"
+                    bonded -> "Bonded · 1 link"
+                    readyLinks >= 2 -> "Boosting · 2 links"
+                    else -> "Running · 1 link"
+                } to (if (readyLinks >= 2) c.good else c.warn)
                 Phase.STARTING -> "Starting…" to c.warn
                 Phase.STOPPING -> "Stopping…" to c.muted
                 Phase.OFF -> "Off" to c.muted

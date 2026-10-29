@@ -44,6 +44,9 @@ data class SpeedResult(
      * new handle and combining starts again.
      */
     val wifiHandle: Long? = null,
+    /** One single connection through the bond server (null = not tested: bond off). */
+    val bondDown: Double? = null,
+    val bondUp: Double? = null,
 ) {
     val bestSingleDown: Double? get() = listOfNotNull(wifi?.downMbps, mobile?.downMbps).maxOrNull()
 }
@@ -58,6 +61,8 @@ enum class TestStage(val label: String) {
     WIFI_UP("Wi-Fi upload"),
     MOBILE_UP("Mobile upload"),
     BOTH_UP("Combined upload"),
+    BOND_DOWN("Bonded download (1 connection)"),
+    BOND_UP("Bonded upload (1 connection)"),
     DONE("Done"),
     ERROR("Test failed"),
 }
@@ -233,6 +238,8 @@ object SpeedTest {
                 TestStage.WIFI_UP.takeIf { wifi != null },
                 TestStage.MOBILE_UP.takeIf { mobile != null },
                 TestStage.BOTH_UP.takeIf { wifi != null && mobile != null },
+                TestStage.BOND_DOWN.takeIf { bondNow() != null },
+                TestStage.BOND_UP.takeIf { bondNow() != null },
             )
             fun stage(st: TestStage) {
                 _ui.value = _ui.value.copy(stage = st, progress = phases.indexOf(st).toFloat() / phases.size, liveMbps = 0.0, partial = res)
@@ -322,6 +329,16 @@ object SpeedTest {
                 res = res.copy(combinedUp = if (w != null && m != null) w.mbps + m.mbps else null)
             }
 
+            // ---- bonded: one connection through the server, split over both links
+            bondNow()?.let { b ->
+                stage(TestStage.BOND_DOWN)
+                val d = bondMeasure(b, download = true)
+                res = res.copy(bondDown = d); check()
+                stage(TestStage.BOND_UP)
+                val u = bondMeasure(b, download = false)
+                res = res.copy(bondUp = u); check()
+            }
+
             // ---- verdict
             val best = res.bestSingleDown
             val combined = res.combinedDown
@@ -370,6 +387,54 @@ object SpeedTest {
             settings.addWifiUsage(wifiBytes)
             settings.addMobileUsage(mobileBytes)
         }
+    }
+
+    private fun bondNow(): com.dualboost.app.bond.BondClient? = BondConfig.client?.takeIf { it.connected }
+
+    /**
+     * Speed of ONE connection through the bond. Download: the server streams data. Upload: we
+     * stream and count what the server confirms. Its bytes are counted per link by the boost.
+     */
+    private fun bondMeasure(b: com.dualboost.app.bond.BondClient, download: Boolean): Double? {
+        val f = runCatching { b.openSpeed(download) }.getOrNull() ?: return null
+        val stop = AtomicBoolean(false)
+        val moved = AtomicLong()
+        val t = Thread({
+            val buf = ByteArray(64 * 1024)
+            try {
+                if (download) {
+                    while (!stop.get()) { val n = f.input.read(buf); if (n < 0) break; moved.addAndGet(n.toLong()) }
+                } else {
+                    while (!stop.get()) f.output.write(buf)
+                }
+            } catch (_: Exception) {
+            }
+        }, "st-bond").apply { isDaemon = true; start() }
+        fun now(): Long = if (download) moved.get() else f.confirmed
+        val duration = if (download) DOWN_MS else UP_MS
+        val t0 = System.currentTimeMillis()
+        var warm = 0L; var warmAt = 0L
+        var last = 0L; var lastAt = t0
+        try {
+            while (System.currentTimeMillis() - t0 < duration) {
+                Thread.sleep(250)
+                check()
+                val ms = System.currentTimeMillis()
+                if (warmAt == 0L && ms - t0 >= WARMUP_MS) { warmAt = ms; warm = now() }
+                if (ms - lastAt >= 500) {
+                    val v = now()
+                    _ui.value = _ui.value.copy(liveMbps = (v - last) * 8.0 / ((ms - lastAt) / 1000.0) / 1e6)
+                    last = v; lastAt = ms
+                }
+                if (f.closed) break
+            }
+        } finally {
+            stop.set(true)
+            f.close() // wakes the reader/writer thread, which then ends
+        }
+        val secs = (System.currentTimeMillis() - warmAt) / 1000.0
+        val bytes = now() - warm
+        return if (warmAt > 0 && bytes > 0 && secs > 0) bytes * 8.0 / secs / 1e6 else null
     }
 
     private fun check() {
@@ -630,6 +695,7 @@ object SpeedTest {
         return "wifi down ${f(r.wifi?.downMbps)} up ${f(r.wifi?.upMbps)} ping ${r.wifi?.pingMs ?: "-"} | " +
             "mobile down ${f(r.mobile?.downMbps)} up ${f(r.mobile?.upMbps)} ping ${r.mobile?.pingMs ?: "-"} | " +
             "combined down ${f(r.combinedDown)} up ${f(r.combinedUp)} Mbps" +
+            (if (r.bondDown != null || r.bondUp != null) " | bonded 1-conn down ${f(r.bondDown)} up ${f(r.bondUp)}" else "") +
             (r.onlyLink?.let { " | combining slower: using $it only" } ?: "")
     }
 
@@ -644,6 +710,7 @@ object SpeedTest {
         r.combinedDown?.let { put("cd", it) }; r.combinedUp?.let { put("cu", it) }
         r.wifi?.let { put("w", linkJson(it)) }; r.mobile?.let { put("m", linkJson(it)) }
         r.problem?.let { put("pr", it) }; r.onlyLink?.let { put("ol", it.name) }; r.wifiHandle?.let { put("wh", it) }
+        r.bondDown?.let { put("bd", it) }; r.bondUp?.let { put("bu", it) }
     }
 
     private fun linkJson(l: LinkSpeed) = JSONObject().apply {
@@ -667,6 +734,8 @@ object SpeedTest {
             o.optString("pr").takeIf { it.isNotEmpty() },
             o.optString("ol").takeIf { it.isNotEmpty() }?.let { n -> runCatching { LinkType.valueOf(n) }.getOrNull() },
             if (o.has("wh")) o.getLong("wh") else null,
+            if (o.has("bd")) o.getDouble("bd") else null,
+            if (o.has("bu")) o.getDouble("bu") else null,
         )
     }
 }

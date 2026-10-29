@@ -15,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -40,6 +41,7 @@ fun SettingsScreen(
     onOpenUpdates: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onOpenReport: () -> Unit,
+    onOpenBond: () -> Unit,
     onAlwaysOn: () -> Unit,
     onBattery: () -> Unit,
     onDeveloper: () -> Unit,
@@ -79,6 +81,27 @@ fun SettingsScreen(
                     "Uses Wi-Fi only. If Wi-Fi drops or stops working, mobile data takes over instantly.",
                 color = c.muted, style = Db.small,
                 modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 18.dp),
+            )
+        }
+
+        // ---- Bond server
+        SectionHeader("Bond server")
+        SettingsGroup {
+            val cfg = com.dualboost.app.core.BondConfig.state.collectAsState().value
+            val b = ui.bond
+            ChevronRow(
+                "Bond server",
+                when {
+                    !cfg.configured -> "Free server that joins both links into one connection"
+                    !cfg.enabled -> "Off · uses normal combining"
+                    ui.phase != com.dualboost.app.core.Phase.ON -> "On · connects when the boost starts"
+                    b.status == com.dualboost.app.core.BondStatus.CONNECTED -> "Connected · ${if (b.pingMs >= 0) "${b.pingMs} ms" else "both links joined"}"
+                    b.status == com.dualboost.app.core.BondStatus.UNREACHABLE -> "Not answering · using normal combining"
+                    else -> "Connecting…"
+                },
+                R.drawable.ic_server, c.purple,
+                value = when { !cfg.configured -> "Set up"; cfg.enabled -> "On"; else -> "Off" },
+                onClick = onOpenBond,
             )
         }
 
