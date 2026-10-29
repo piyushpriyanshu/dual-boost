@@ -130,7 +130,7 @@ Description=DualBoost bond server
 After=network-online.target
 Wants=network-online.target
 [Service]
-ExecStart=$BIN -listen :${'$'}PORT
+ExecStart=${'$'}BIN -listen :${'$'}PORT
 LoadCredential=key:/etc/dualboost/key
 DynamicUser=yes
 AmbientCapabilities=CAP_NET_BIND_SERVICE
