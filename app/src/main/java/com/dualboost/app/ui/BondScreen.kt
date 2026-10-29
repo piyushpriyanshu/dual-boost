@@ -71,6 +71,15 @@ fun BondScreen(phase: Phase, bond: BondUi, onBack: () -> Unit, onSpeedTest: () -
         Toast.makeText(context, "Setup script copied", Toast.LENGTH_SHORT).show()
     }
 
+    fun saveFile() {
+        val ok = BondConfig.saveScriptFile(context, BondConfig.get(context))
+        Toast.makeText(
+            context,
+            if (ok) "Saved to Downloads as dualboost-setup.sh" else "Couldn't save the file. Use Copy setup script instead.",
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+
     fun save() {
         val parsed = BondConfig.parseAddress(address)
         if (parsed == null) {
@@ -216,6 +225,8 @@ fun BondScreen(phase: Phase, bond: BondUi, onBack: () -> Unit, onSpeedTest: () -
                         Spacer(Modifier.width(Db.s3))
                         Box(Modifier.weight(1f)) { SecondaryButton("Copy script") { copyScript() } }
                     }
+                    Spacer(Modifier.height(Db.s3))
+                    SecondaryButton("Save script file (for upload)") { saveFile() }
                 }
             }
         }
@@ -252,8 +263,9 @@ private val SETUP_STEPS = listOf(
         "(marked Always Free). If it says out of capacity, try another availability domain or try again later.",
     "Network and key" to "Keep the new virtual cloud network and \"Assign a public IPv4 address\". " +
         "For SSH keys choose \"No SSH keys\": you never need to log in.",
-    "Paste the setup script" to "Tap Copy setup script below. In Show advanced options → Management, choose " +
-        "\"Paste cloud-init script\" and paste it. Then tap Create.",
+    "Add the setup script" to "Under Advanced options → Management → Initialization script: if you see " +
+        "\"Paste cloud-init script\", tap Copy script below and paste it. Otherwise tap Save script file below and " +
+        "choose dualboost-setup.sh from Downloads. Then tap Create.",
     "Open port 443" to "When the server is Running: Networking → its subnet → Default Security List → Add Ingress Rules. " +
         "Source CIDR 0.0.0.0/0, IP protocol TCP, destination port 443.",
     "Enter the address" to "Copy the server's Public IP address, paste it above and tap Save. " +

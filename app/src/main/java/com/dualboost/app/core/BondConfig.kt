@@ -195,6 +195,27 @@ systemctl daemon-reload
 systemctl enable --now dualboost.service dualboost-update.timer
 """.trimStart()
 
+    /**
+     * Saves the setup script as Downloads/dualboost-setup.sh, so it can be picked in Oracle's
+     * "Initialization script" file chooser. Replaces an older copy. Returns true on success.
+     */
+    fun saveScriptFile(context: Context, cfg: BondCfg): Boolean = runCatching {
+        val r = context.contentResolver
+        val name = "dualboost-setup.sh"
+        r.delete(
+            android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            "${android.provider.MediaStore.Downloads.DISPLAY_NAME}=?", arrayOf(name),
+        )
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+            put(android.provider.MediaStore.Downloads.MIME_TYPE, "text/plain")
+            put(android.provider.MediaStore.Downloads.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+        }
+        val uri = r.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
+        r.openOutputStream(uri, "wt")!!.use { it.write(setupScript(cfg).toByteArray()) }
+        true
+    }.getOrDefault(false)
+
     /** Short text shown when a pasted setup script is checked, e.g. "Key ends …a1b2". */
     fun keyHint(cfg: BondCfg): String = "…" + cfg.key.takeLast(4)
 }
