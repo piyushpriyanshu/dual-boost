@@ -279,6 +279,8 @@ class BoostVpnService : VpnService() {
                 mobileTodayBytes = settings.mobileUsedToday(),
                 wifiTodayBytes = settings.wifiUsedToday(),
                 mobileCapReached = capReached,
+                topTodayMbps = settings.topToday(),
+                rescuesToday = settings.rescuesToday(),
             )
         }
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -309,6 +311,24 @@ class BoostVpnService : VpnService() {
         // Reporting only Wi-Fi keeps apps (Play Store, YouTube) in their "unmetered" behaviour.
         if (settings.current.treatAsWifi && wifi != null) return arrayOf(wifi)
         return lm.activeNetworks().toTypedArray()
+    }
+
+    /** Which links were usable at the last check (to count rescues). */
+    private val wasUsable = BooleanArray(2)
+    private var bondRescuesSeen = 0
+
+    /** A link that stops being usable while the other one is fine, with the boost on, is a rescue. */
+    private fun countRescues(lm: LinkMonitor) {
+        lm.all.forEachIndexed { i, l ->
+            val now = l.isUp && l.healthy
+            val other = lm.all.getOrNull(1 - i)?.let { it.isUp && it.healthy } == true
+            if (wasUsable[i] && !now && other && tun != null) {
+                settings.addRescue()
+                Diag.i(TAG, "${l.type} dropped; the other link took over")
+            }
+            wasUsable[i] = now
+        }
+        bond?.rescues?.get()?.let { n -> if (n > bondRescuesSeen) { repeat(n - bondRescuesSeen) { settings.addRescue() }; bondRescuesSeen = n } }
     }
 
     private fun onLinksChanged() {
@@ -369,6 +389,7 @@ class BoostVpnService : VpnService() {
     }
 
     private fun startBond(lm: LinkMonitor) {
+        bondRescuesSeen = 0
         val cfg = BondConfig.get(this)
         bondBuiltWith = cfg
         bondDownSince = 0L
@@ -647,10 +668,12 @@ class BoostVpnService : VpnService() {
         capReached = isCapReached()
 
         val bondUi = bondTick()
+        countRescues(lm)
 
         val w = ui[0]!!; val m = ui[1]!!
         push(wifiHist, w.downMbps.toFloat()); push(mobileHist, m.downMbps.toFloat())
         peak = maxOf(peak, w.downMbps + m.downMbps)
+        settings.recordSpeed(w.downMbps + m.downMbps)
 
         val engineAlive = TunnelNative.TProxyIsRunning()
         BoostState.update {
@@ -662,6 +685,8 @@ class BoostVpnService : VpnService() {
                 wifiTodayBytes = settings.wifiUsedToday(),
                 mobileCapReached = capReached,
                 bond = bondUi,
+                topTodayMbps = settings.topToday(),
+                rescuesToday = settings.rescuesToday(),
             )
         }
         val relayAlive = relay?.alive == true

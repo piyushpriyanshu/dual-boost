@@ -177,7 +177,8 @@ private fun HeroCard(ui: BoostUi, on: Boolean) {
             val bonded = ui.bond.status == com.dualboost.app.core.BondStatus.CONNECTED
             val (pillText, pillDot) = when (ui.phase) {
                 Phase.ON -> when {
-                    bonded && ui.bond.wifiUp && ui.bond.mobileUp -> "Bonded · 2 links"
+                    bonded && ui.bond.wifiUp && ui.bond.mobileUp ->
+                        "Bonded · 2 links" + (if (ui.bond.pingMs >= 0) " · ${ui.bond.pingMs} ms" else "")
                     bonded -> "Bonded · 1 link"
                     readyLinks >= 2 -> "Boosting · 2 links"
                     else -> "Running · 1 link"
@@ -265,7 +266,12 @@ private fun LinkCard(
         Spacer(Modifier.height(10.dp))
         Text(
             when {
-                on && link.status != LinkStatus.OFF -> "↑ ${formatSpeed(link.upMbps, LocalSpeedUnit.current)} · ${link.connections} active"
+                // Like Speedify's per-connection view: upload, latency, and loss when there is any.
+                on && link.status != LinkStatus.OFF -> buildString {
+                    append("↑ ${formatSpeed(link.upMbps, LocalSpeedUnit.current)}")
+                    if (link.rttMs > 0) append(" · ${link.rttMs} ms")
+                    if (link.lossPercent > 0) append(" · ${link.lossPercent}% loss")
+                }
                 on -> "Not connected"
                 idleAvailable -> "Ready to combine"
                 else -> "Not connected"
@@ -371,12 +377,15 @@ private fun ChartCard(ui: BoostUi, on: Boolean) {
 private fun StatsCard(ui: BoostUi, on: Boolean, now: Long) {
     val unit = LocalSpeedUnit.current
     val up = formatSpeed(ui.totalUp, unit)
-    val peak = formatSpeed(ui.peakMbps, unit)
+    val top = formatSpeed(maxOf(ui.topTodayMbps, ui.peakMbps), unit)
     DbCard(Modifier.fillMaxWidth(), padding = 0.dp) {
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             StatCell(Modifier.weight(1f), "Upload", if (on) up.value else null, up.unit, center = true)
             VLine()
-            StatCell(Modifier.weight(1f), "Peak", if (on) peak.value else null, peak.unit, center = true)
+            StatCell(Modifier.weight(1f), "Top today", if (ui.topTodayMbps > 0 || on) top.value else null, top.unit, center = true)
+            VLine()
+            // Speedify-style "connections rescued": a link dropped and the other one carried on.
+            StatCell(Modifier.weight(1f), "Rescued", "${ui.rescuesToday}", null, center = true)
             VLine()
             StatCell(
                 Modifier.weight(1f), "Session",

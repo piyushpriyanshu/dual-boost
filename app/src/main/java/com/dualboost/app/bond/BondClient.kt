@@ -119,6 +119,9 @@ class BondClient(
     @Volatile private var running = false
     private var ticker: Thread? = null
 
+    /** Times a link went silent mid-transfer and its data moved to the other link. */
+    val rescues = java.util.concurrent.atomic.AtomicInteger()
+
     /** Last error while connecting, for the UI. */
     @Volatile var lastError: String? = null; private set
 
@@ -613,6 +616,7 @@ class BondClient(
                         subs.values.any { it !== s && !it.dead && now - it.lastRecv < 300_000_000L }
                     ) {
                         s.suspect = true
+                        if (s.log.isNotEmpty()) rescues.incrementAndGet()
                         val again = s.log.map { it.f }
                         for (i in again.indices.reversed()) reinj.addFirst(again[i])
                         log("subflow ${s.id} silent: copying ${again.size} frames to other subflows")
