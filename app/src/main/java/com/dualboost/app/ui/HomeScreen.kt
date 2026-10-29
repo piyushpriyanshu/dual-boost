@@ -268,7 +268,8 @@ private fun LinkCard(
             when {
                 // Like Speedify's per-connection view: upload, latency, and loss when there is any.
                 on && link.status != LinkStatus.OFF -> buildString {
-                    append("↑ ${formatSpeed(link.upMbps, LocalSpeedUnit.current)}")
+                    // Upload without its unit (same unit as the big number) so the line fits.
+                    append("↑ ${formatSpeed(link.upMbps, LocalSpeedUnit.current).value}")
                     if (link.rttMs > 0) append(" · ${link.rttMs} ms")
                     if (link.lossPercent > 0) append(" · ${link.lossPercent}% loss")
                 }
