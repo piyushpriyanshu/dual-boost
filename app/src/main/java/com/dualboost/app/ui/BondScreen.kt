@@ -258,11 +258,13 @@ fun BondScreen(phase: Phase, bond: BondUi, onBack: () -> Unit, onSpeedTest: () -
 }
 
 private val SETUP_STEPS = listOf(
-    "Create the server" to "Open Oracle Cloud → Compute → Instances → Create instance. Name it DualBoost.",
+    "Create the server" to "Open Oracle Cloud → Compute → Instances → Create instance. Name it DualBoost " +
+        "(make the network first: see step 3).",
     "Image and shape" to "Image: Canonical Ubuntu 24.04. Shape: Ampere VM.Standard.A1.Flex with 1 OCPU and 1 GB memory " +
         "(marked Always Free). If it says out of capacity, try another availability domain or try again later.",
-    "Network and key" to "Keep the new virtual cloud network and \"Assign a public IPv4 address\". " +
-        "For SSH keys choose \"No SSH keys\": you never need to log in.",
+    "Network and key" to "First, in Networking → Virtual cloud networks → Start VCN Wizard → \"Create VCN with Internet " +
+        "Connectivity\", make dualboost-vcn. In the instance form pick it and its public subnet, then turn on " +
+        "\"Automatically assign public IPv4 address\". For SSH keys choose \"No SSH keys\".",
     "Add the setup script" to "Under Advanced options → Management → Initialization script: if you see " +
         "\"Paste cloud-init script\", tap Copy script below and paste it. Otherwise tap Save script file below and " +
         "choose dualboost-setup.sh from Downloads. Then tap Create.",
