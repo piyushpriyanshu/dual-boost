@@ -14,6 +14,7 @@ import com.dualboost.app.update.Updater
 class DualBoostApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        com.dualboost.app.core.BondConfig.get(this) // creates the bond key on first run
         Diag.init(this)
         val nm = getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(CHANNEL_ID, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW).apply {

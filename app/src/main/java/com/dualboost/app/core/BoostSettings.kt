@@ -184,10 +184,28 @@ class BoostSettings private constructor(context: Context) {
         prefs.edit().putLong(K_WIFI_USED, prefs.getLong(K_WIFI_USED, 0L) + bytes).apply()
     }
 
+    /** Highest combined download speed today (Mbps). */
+    @Synchronized
+    fun topToday(): Double { rollDay(); return prefs.getFloat(K_TOP, 0f).toDouble() }
+
+    @Synchronized
+    fun recordSpeed(mbps: Double) {
+        rollDay()
+        if (mbps > prefs.getFloat(K_TOP, 0f)) prefs.edit().putFloat(K_TOP, mbps.toFloat()).apply()
+    }
+
+    /** Times today a link dropped (or went silent) and the other one carried on. */
+    @Synchronized
+    fun rescuesToday(): Int { rollDay(); return prefs.getInt(K_RESCUES, 0) }
+
+    @Synchronized
+    fun addRescue() { rollDay(); prefs.edit().putInt(K_RESCUES, prefs.getInt(K_RESCUES, 0) + 1).apply() }
+
     private fun rollDay() {
         val today = LocalDate.now().toString()
         if (prefs.getString(K_DAY, null) != today) {
-            prefs.edit().putString(K_DAY, today).putLong(K_USED, 0L).putLong(K_WIFI_USED, 0L).apply()
+            prefs.edit().putString(K_DAY, today).putLong(K_USED, 0L).putLong(K_WIFI_USED, 0L)
+                .putFloat(K_TOP, 0f).putInt(K_RESCUES, 0).apply()
         }
     }
 
@@ -206,6 +224,8 @@ class BoostSettings private constructor(context: Context) {
         private const val K_EXCL = "excluded_apps"
         private const val K_USED = "mobile_used"
         private const val K_DAY = "mobile_day"
+        private const val K_TOP = "top_today"
+        private const val K_RESCUES = "rescues_today"
         private const val K_WANT = "want_running"
         private const val K_UPD = "update_check"
         private const val K_AUTOUPD = "auto_update"

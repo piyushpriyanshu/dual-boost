@@ -17,7 +17,17 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.dualboost.app.DualBoostApp
 import com.dualboost.app.R
+import com.dualboost.app.bond.BondClient
+import com.dualboost.app.bond.BondLink
+import com.dualboost.app.core.AppRule
 import com.dualboost.app.core.Balancer
+import com.dualboost.app.core.BondCfg
+import com.dualboost.app.core.BondConfig
+import com.dualboost.app.core.BondStatus
+import com.dualboost.app.core.BondUi
+import com.dualboost.app.core.BoostMode
+import com.dualboost.app.core.LinkType
+import com.dualboost.app.core.ruleFor
 import com.dualboost.app.core.BoostSettings
 import com.dualboost.app.core.BoostState
 import com.dualboost.app.core.BoostUi
@@ -55,6 +65,12 @@ class BoostVpnService : VpnService() {
     private var ticker: ScheduledExecutorService? = null
 
     private val mobilePending = AtomicLong()
+
+    // Bond (optional server that joins both links into one)
+    @Volatile private var bond: BondClient? = null
+    private var bondBuiltWith: BondCfg? = null
+    private var bondDownSince = 0L
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
     @Volatile private var capReached = false
     @Volatile private var mobileToday = 0L
 
@@ -127,7 +143,9 @@ class BoostVpnService : VpnService() {
             val bal = Balancer(lm, { settings.current }, { capReached }, { SpeedTest.onlyLink(this, lm.wifi.network) })
             SpeedTest.onlyLink(this, lm.wifi.network)?.let { Diag.w(TAG, "combine guard on: last speed test showed both links together slower; using $it only") }
             balancer = bal
-            val rs = RelayServer(lm, bal, { n -> mobilePending.addAndGet(n) }, ::ownerOf)
+            startBond(lm)
+            holdWifiLock(true)
+            val rs = RelayServer(lm, bal, { n -> mobilePending.addAndGet(n) }, ::ownerOf, ::bondFor)
             relay = rs
             rs.start()
 
@@ -261,6 +279,8 @@ class BoostVpnService : VpnService() {
                 mobileTodayBytes = settings.mobileUsedToday(),
                 wifiTodayBytes = settings.wifiUsedToday(),
                 mobileCapReached = capReached,
+                topTodayMbps = settings.topToday(),
+                rescuesToday = settings.rescuesToday(),
             )
         }
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -275,6 +295,8 @@ class BoostVpnService : VpnService() {
         runCatching { if (TunnelNative.TProxyIsRunning()) TunnelNative.TProxyStopService() }
         runCatching { tun?.close() }; tun = null
         relay?.stop(); relay = null
+        stopBond()
+        holdWifiLock(false)
         balancer?.clear(); balancer = null
         flushWifiUsage() // before the link counters go away
         links?.stop(); links = null
@@ -289,6 +311,24 @@ class BoostVpnService : VpnService() {
         // Reporting only Wi-Fi keeps apps (Play Store, YouTube) in their "unmetered" behaviour.
         if (settings.current.treatAsWifi && wifi != null) return arrayOf(wifi)
         return lm.activeNetworks().toTypedArray()
+    }
+
+    /** Which links were usable at the last check (to count rescues). */
+    private val wasUsable = BooleanArray(2)
+    private var bondRescuesSeen = 0
+
+    /** A link that stops being usable while the other one is fine, with the boost on, is a rescue. */
+    private fun countRescues(lm: LinkMonitor) {
+        lm.all.forEachIndexed { i, l ->
+            val now = l.isUp && l.healthy
+            val other = lm.all.getOrNull(1 - i)?.let { it.isUp && it.healthy } == true
+            if (wasUsable[i] && !now && other && tun != null) {
+                settings.addRescue()
+                Diag.i(TAG, "${l.type} dropped; the other link took over")
+            }
+            wasUsable[i] = now
+        }
+        bond?.rescues?.get()?.let { n -> if (n > bondRescuesSeen) { repeat(n - bondRescuesSeen) { settings.addRescue() }; bondRescuesSeen = n } }
     }
 
     private fun onLinksChanged() {
@@ -309,6 +349,125 @@ class BoostVpnService : VpnService() {
         !l.isUp -> LinkStatus.OFF
         !l.validated || !l.healthy -> LinkStatus.NO_INTERNET
         else -> LinkStatus.READY
+    }
+
+    // ------------------------------------------------------------------ bond
+
+    /** One network as seen by the bond client: sockets are pinned to it with bindSocket. */
+    private inner class BondLinkOf(val l: Link, val net: Network, override val standby: Boolean) : BondLink {
+        override val type = if (l.type == LinkType.WIFI) 1 else 2
+        override val identity: Any = net
+        override fun connect(host: String, port: Int, timeoutMs: Int): java.net.Socket {
+            val sock = java.net.Socket()
+            try {
+                net.bindSocket(sock)
+                val all = net.getAllByName(host)
+                val addr = all.firstOrNull { it is java.net.Inet4Address } ?: all.first()
+                sock.connect(java.net.InetSocketAddress(addr, port), timeoutMs)
+                return sock
+            } catch (e: Exception) {
+                runCatching { sock.close() }
+                throw e
+            }
+        }
+        override fun count(rx: Long, tx: Long) {
+            l.rxBytes.addAndGet(rx); l.txBytes.addAndGet(tx)
+            if (l.type == LinkType.MOBILE) mobilePending.addAndGet(rx + tx)
+        }
+    }
+
+    /**
+     * Standby links stay connected to the server but carry traffic only if the other link fails:
+     * mobile in Backup mode or after the daily limit; the slower link when the speed test showed
+     * that using both at once is slower on this Wi-Fi.
+     */
+    private fun bondStandby(l: Link, lm: LinkMonitor): Boolean {
+        val s = settings.current
+        if (l.type == LinkType.MOBILE && (s.mode == BoostMode.BACKUP || capReached)) return true
+        val only = SpeedTest.onlyLink(this, lm.wifi.network) ?: return false
+        return only != l.type
+    }
+
+    private fun startBond(lm: LinkMonitor) {
+        bondRescuesSeen = 0
+        val cfg = BondConfig.get(this)
+        bondBuiltWith = cfg
+        bondDownSince = 0L
+        if (!cfg.enabled || !cfg.configured) return
+        val key = runCatching { BondConfig.keyBytes(cfg) }.getOrNull()?.takeIf { it.size == 32 } ?: return
+        val c = BondClient(
+            cfg.host, cfg.port, key,
+            links = { lm.all.mapNotNull { l -> val n = l.network; if (l.isUp && n != null) BondLinkOf(l, n, bondStandby(l, lm)) else null } },
+            perLink = 2,
+            log = { Diag.i("DualBoost/Bond", it) },
+        )
+        c.start()
+        bond = c
+        BondConfig.client = c
+        Diag.i(TAG, "bond started: server ${cfg.host}:${cfg.port}")
+    }
+
+    private fun stopBond() {
+        val c = bond ?: return
+        bond = null
+        BondConfig.client = null
+        runCatching { c.stop() }
+    }
+
+    /** Every second: applies bond setting changes live and reports its state. */
+    private fun bondTick(): BondUi {
+        val cfg = BondConfig.get(this)
+        val lm = links
+        if (cfg != bondBuiltWith && lm != null) {
+            // Server, key or on/off changed: restart only the bond (existing direct connections stay).
+            stopBond(); startBond(lm)
+        }
+        val c = bond
+        val now = System.currentTimeMillis()
+        if (!cfg.configured) return BondUi(BondStatus.NOT_SET_UP)
+        if (!cfg.enabled || c == null) return BondUi(BondStatus.OFF)
+        val types = c.liveTypes()
+        if (types.isNotEmpty()) {
+            bondDownSince = 0L
+            return BondUi(BondStatus.CONNECTED, c.pingMs(), wifiUp = 1 in types, mobileUp = 2 in types)
+        }
+        if (bondDownSince == 0L) bondDownSince = now
+        val status = if (now - bondDownSince > 15_000) BondStatus.UNREACHABLE else BondStatus.CONNECTING
+        return BondUi(status, error = c.lastError, downSince = bondDownSince)
+    }
+
+    /**
+     * Which connections go through the bond: apps on "Both links" (the default), including DNS
+     * and QUIC. Games, calls and apps with their own rule stay direct (lowest ping, or the link
+     * they asked for). Null = direct.
+     */
+    private fun bondFor(app: String?, udp: Boolean, port: Int): BondClient? {
+        val c = bond ?: return null
+        if (!c.connected) return null
+        val s = settings.current
+        if (s.ruleFor(app) != AppRule.BOTH) return null
+        if (udp && s.lowPingMode && port != 53 && port != 443) return null // real-time UDP: games and calls
+        return c
+    }
+
+    /** Wi-Fi stays in its low-latency, no-power-save mode while boosting (no stutters). */
+    private fun holdWifiLock(on: Boolean) {
+        try {
+            if (on) {
+                if (wifiLock == null) {
+                    val wm = applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
+                    @Suppress("DEPRECATION")
+                    val mode = if (Build.VERSION.SDK_INT >= 29) android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                    else android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                    wifiLock = wm.createWifiLock(mode, "DualBoost:boost").apply { setReferenceCounted(false); acquire() }
+                }
+            } else {
+                wifiLock?.let { if (it.isHeld) it.release() }
+                wifiLock = null
+            }
+        } catch (e: Exception) {
+            Diag.w(TAG, "Wi-Fi lock: ${e.message}")
+        }
     }
 
     // ------------------------------------------------------------------ connection owner (per-app rules)
@@ -410,7 +569,7 @@ class BoostVpnService : VpnService() {
             val bal = balancer ?: return
             if (relay?.alive != true) {
                 relay?.stop()
-                relay = RelayServer(lm, bal, { n -> mobilePending.addAndGet(n) }, ::ownerOf).also { it.start() }
+                relay = RelayServer(lm, bal, { n -> mobilePending.addAndGet(n) }, ::ownerOf, ::bondFor).also { it.start() }
             }
             establishTunnel()
         } catch (e: Exception) {
@@ -508,9 +667,13 @@ class BoostVpnService : VpnService() {
         mobileToday = settings.mobileUsedToday()
         capReached = isCapReached()
 
+        val bondUi = bondTick()
+        countRescues(lm)
+
         val w = ui[0]!!; val m = ui[1]!!
         push(wifiHist, w.downMbps.toFloat()); push(mobileHist, m.downMbps.toFloat())
         peak = maxOf(peak, w.downMbps + m.downMbps)
+        settings.recordSpeed(w.downMbps + m.downMbps)
 
         val engineAlive = TunnelNative.TProxyIsRunning()
         BoostState.update {
@@ -521,6 +684,9 @@ class BoostVpnService : VpnService() {
                 mobileTodayBytes = mobileToday,
                 wifiTodayBytes = settings.wifiUsedToday(),
                 mobileCapReached = capReached,
+                bond = bondUi,
+                topTodayMbps = settings.topToday(),
+                rescuesToday = settings.rescuesToday(),
             )
         }
         val relayAlive = relay?.alive == true

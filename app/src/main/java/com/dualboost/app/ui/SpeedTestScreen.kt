@@ -133,6 +133,18 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                     ping = null,
                     active = st.stage == TestStage.BOTH_DOWN || st.stage == TestStage.BOTH_UP,
                 )
+                val bondShown = result?.bondDown != null || result?.bondUp != null ||
+                    st.stage == TestStage.BOND_DOWN || st.stage == TestStage.BOND_UP
+                if (bondShown) {
+                    RowDivider(inset = false)
+                    ResultRow(
+                        label = "Bonded", color = c.purple, bold = true,
+                        down = result?.bondDown?.let { formatSpeed(it, unit).toString() },
+                        up = result?.bondUp?.let { formatSpeed(it, unit).toString() },
+                        ping = null,
+                        active = st.stage == TestStage.BOND_DOWN || st.stage == TestStage.BOND_UP,
+                    )
+                }
             }
 
             // ---- Insight
@@ -172,6 +184,14 @@ fun SpeedTestScreen(onBack: () -> Unit) {
                 if (problem != null && !st.running && note != problem) {
                     Spacer(Modifier.height(Db.s2))
                     Text(problem, color = c.mobile, style = Db.caption)
+                }
+                if (result?.bondDown != null && !st.running) {
+                    Spacer(Modifier.height(Db.s2))
+                    Text(
+                        "Bonded = one single connection through your server, split over both links. " +
+                            "This is what a single video, call or download gets.",
+                        color = c.muted, style = Db.caption,
+                    )
                 }
                 if (result != null && result.mobileBytes > 0 && !st.running) {
                     Spacer(Modifier.height(Db.s2))

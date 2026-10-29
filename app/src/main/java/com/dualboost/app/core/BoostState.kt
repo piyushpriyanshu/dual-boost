@@ -39,6 +39,12 @@ data class BoostUi(
     val error: String? = null,
     /** DNS servers actually in use (for display). */
     val dnsInUse: List<String> = emptyList(),
+    /** Bond server state. */
+    val bond: BondUi = BondUi(),
+    /** Highest combined speed today, Mbps. */
+    val topTodayMbps: Double = 0.0,
+    /** Times today a link dropped and the other one took over. */
+    val rescuesToday: Int = 0,
 ) {
     val totalDown: Double get() = wifi.downMbps + mobile.downMbps
     val totalUp: Double get() = wifi.upMbps + mobile.upMbps

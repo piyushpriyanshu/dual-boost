@@ -59,7 +59,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
-private enum class Screen { HOME, SETTINGS, UPDATES, APPS, SPEED, DOWNLOADS, DIAGNOSTICS, REPORT }
+private enum class Screen { HOME, SETTINGS, UPDATES, APPS, SPEED, DOWNLOADS, DIAGNOSTICS, REPORT, BOND }
 
 /** A request coming from a notification, shortcut, widget or share. */
 private data class NavRequest(val screen: Screen? = null, val toggle: Boolean = false, val url: String? = null)
@@ -282,6 +282,7 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
                     onOpenUpdates = { go(Screen.UPDATES) },
                     onOpenDiagnostics = { go(Screen.DIAGNOSTICS) },
                     onOpenReport = { go(Screen.REPORT) },
+                    onOpenBond = { go(Screen.BOND) },
                     onAlwaysOn = { open(context, Intent(Settings.ACTION_VPN_SETTINGS)) },
                     onBattery = { openBattery(context, batteryOk) },
                     onDeveloper = { openDeveloperOptions(context) },
@@ -312,6 +313,7 @@ private fun App(settings: BoostSettings, updateTapped: MutableStateFlow<Boolean>
                     onBack = { back() }, onSpeedTest = { go(Screen.SPEED) }, onReport = { go(Screen.REPORT) },
                 )
                 Screen.REPORT -> ReportScreen(onBack = { back() })
+                Screen.BOND -> BondScreen(phase = ui.phase, bond = ui.bond, onBack = { back() }, onSpeedTest = { go(Screen.SPEED) })
             }
         }
     }
