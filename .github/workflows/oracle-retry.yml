@@ -51,5 +51,6 @@ jobs:
         run: |
           gh issue create --repo "$GITHUB_REPOSITORY" \
             --title "Your DualBoost server is ready" \
-            --body "Oracle created your DualBoost bond server. Open Oracle Cloud -> Compute -> Instances -> DualBoost, copy its Public IP address, then in DualBoost: Settings -> Bond server -> paste -> Save (guide step 31). This automatic retry has now switched itself off." || true
+            --assignee "$GITHUB_REPOSITORY_OWNER" \
+            --body "@$GITHUB_REPOSITORY_OWNER Oracle created your DualBoost bond server. Open Oracle Cloud -> Compute -> Instances -> DualBoost, copy its Public IP address, then in DualBoost: Settings -> Bond server -> paste -> Save (guide step 31). This automatic retry has now switched itself off." || true
           gh workflow disable oracle-retry.yml --repo "$GITHUB_REPOSITORY"
