@@ -3,6 +3,10 @@ name: Build APK
 on:
   push:
     branches: ['**']
+    # The Oracle auto-retry is not part of the app: changing it must not build or release the app.
+    paths-ignore:
+      - '.github/oracle/**'
+      - '.github/workflows/oracle-retry.yml'
   workflow_dispatch:
 
 permissions:
