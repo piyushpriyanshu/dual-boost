@@ -5,8 +5,8 @@ until Oracle has free Ampere capacity. Run every few minutes by .github/workflow
 Prints nothing private: this repository's Actions logs are public. No OCIDs, IPs or Terraform
 logs are printed; the IP is read in the Oracle console (Compute -> Instances -> DualBoost).
 
-Exit codes: 0 = nothing to do / still waiting / created; 2 = server exists (workflow disables
-itself); 1 = a problem that needs a person.
+Exit codes: 0 = still waiting for capacity (the workflow starts the next run); 2 = server exists
+(workflow disables itself); 1 = a problem that needs a person; 3 = secrets not set up yet.
 """
 import os
 import sys
@@ -27,7 +27,7 @@ def config() -> dict:
     missing = [k for k in need if not os.environ.get(k, "").strip()]
     if missing:
         say("Waiting for setup: secrets not added yet (" + ", ".join(missing) + ").")
-        sys.exit(0)
+        sys.exit(3)  # not "still waiting for capacity": don't chain another run
     cfg = {
         "user": os.environ["OCI_USER"].strip(),
         "tenancy": os.environ["OCI_TENANCY"].strip(),
@@ -100,10 +100,31 @@ def main() -> int:
     return 1
 
 
-if __name__ == "__main__":
+def once() -> int:
     try:
-        sys.exit(main())
+        return main()
     except oci.exceptions.ServiceError as e:
+        if e.status == 429 or e.status >= 500:
+            say(f"Oracle is busy (HTTP {e.status}); trying again shortly.")
+            return 0
         # Status and code only: messages can contain OCIDs.
         say(f"Oracle refused the request (HTTP {e.status}, {e.code}). Check the API key secrets.")
-        sys.exit(1)
+        return 1
+
+
+if __name__ == "__main__":
+    # LOOP_MINUTES > 0: keep trying every EVERY_SECONDS within one run (GitHub runs timed jobs
+    # only every few hours on small repositories, so the workflow keeps itself going instead).
+    budget = float(os.environ.get("LOOP_MINUTES", "0")) * 60
+    every = float(os.environ.get("EVERY_SECONDS", "180"))
+    start = time.time()
+    attempt = 0
+    while True:
+        attempt += 1
+        t0 = time.time()
+        code = once()
+        if code != 0 or time.time() - start + every > budget:
+            if budget:
+                say(f"{attempt} attempts in this run.")
+            sys.exit(code)
+        time.sleep(max(5, every - (time.time() - t0)))
