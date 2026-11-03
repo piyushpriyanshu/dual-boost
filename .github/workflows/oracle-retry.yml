@@ -1,10 +1,12 @@
 name: Oracle server auto-retry
 
-# Creates the DualBoost bond server from the saved Oracle stack, retrying every ~5 minutes until
-# Oracle has free capacity. Disables itself once the server exists. Logs show no private data.
+# Creates the DualBoost bond server from the saved Oracle stack. Each run retries every 3 minutes for
+# about 5.5 hours, then starts the next run, so it keeps trying around the clock until Oracle has free
+# capacity (GitHub runs timed jobs only every few hours on small repositories; the schedule below just
+# restarts the chain if it ever stops). Disables itself once the server exists. Logs show no private data.
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -19,7 +21,7 @@ concurrency:
 jobs:
   retry:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,6 +38,8 @@ jobs:
           OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
           OCI_REGION: ${{ secrets.OCI_REGION }}
           OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          LOOP_MINUTES: '330'
+          EVERY_SECONDS: '180'
         run: |
           set +e
           python3 .github/oracle/apply_stack.py
@@ -43,6 +47,12 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
           [ "$code" = 1 ] && exit 1
           exit 0
+
+      - name: Still waiting - start the next run
+        if: steps.try.outputs.code == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run oracle-retry.yml --repo "$GITHUB_REPOSITORY" --ref "${{ github.ref_name }}"
 
       - name: Done - tell the owner and stop retrying
         if: steps.try.outputs.code == '2'
